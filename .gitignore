@@ -14,3 +14,8 @@ dist/
 cookies.json
 /downloads
 .vscode/*
+
+# uv virtual environment
+.venv/
+
+output/
