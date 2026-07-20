@@ -568,3 +568,22 @@ def choose_best_snapshot(candidates: list[SourceSnapshot] | tuple[SourceSnapshot
             preference.get(item.candidate, 0),
         ),
     )
+
+
+@dataclass
+class RunReport:
+    mode: ExportMode
+    collections: list[dict[str, Any]]
+    exit_code: int
+    generated_at: str = field(
+        default_factory=lambda: datetime.now().astimezone().isoformat(timespec="seconds")
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "mode": self.mode.value,
+            "generated_at": self.generated_at,
+            "exit_code": self.exit_code,
+            "collections": self.collections,
+        }

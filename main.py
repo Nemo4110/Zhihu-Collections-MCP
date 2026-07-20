@@ -1,4 +1,5 @@
 # -*- coding:utf-8 -*-
+import argparse
 import os
 import random
 import sys
@@ -27,6 +28,8 @@ from integrity import (
     SourceContentError,
     SourceMetadata,
     SourceSnapshot,
+    RunReport,
+    atomic_write_json,
     atomic_write_text,
     canonicalize_url,
     choose_best_snapshot,
@@ -1553,57 +1556,164 @@ def process_single_collection(collection_name, collection_url):
     print(f"收藏夹 '{collection_name}' 下载完毕")
 
 
-if __name__ == '__main__':
-    # 加载配置
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="导出知乎收藏夹并校验内容完整性")
+    parser.add_argument("--audit", action="store_true", help="严格获取并审计所有支持内容，不修改文件")
+    parser.add_argument("--repair", action="store_true", help="与--audit配合，修复审计发现的问题")
+    parser.add_argument("--force", action="store_true", help="强制重新下载并校验所有支持内容")
+    args = parser.parse_args(argv)
+    if args.repair and not args.audit:
+        parser.error("--repair 必须与 --audit 一起使用")
+    if args.audit and args.force:
+        parser.error("--audit 与 --force 不能同时使用")
+    if args.audit and args.repair:
+        args.mode = ExportMode.AUDIT_REPAIR
+    elif args.audit:
+        args.mode = ExportMode.AUDIT
+    elif args.force:
+        args.mode = ExportMode.FORCE
+    else:
+        args.mode = ExportMode.BALANCED
+    return args
+
+
+def determine_exit_code(collection_reports):
+    if any(
+        report.get("status") in {"collection_incomplete", "manifest_error", "config_error"}
+        or not report.get("collection", {}).get("complete", True)
+        for report in collection_reports
+    ):
+        return 2
+    failing_statuses = {
+        "invalid",
+        "metadata_failed",
+        "source_failed",
+        "render_failed",
+        "render_invalid",
+        "final_invalid",
+    }
+    if any(
+        report.get("status") == "invalid"
+        or any(item.get("status") in failing_statuses for item in report.get("items", []))
+        for report in collection_reports
+    ):
+        return 1
+    return 0
+
+
+def save_integrity_report(collection_reports, mode, logs_dir=None, timestamp=None):
+    directory = pathlib.Path(logs_dir or get_logs_path())
+    directory.mkdir(parents=True, exist_ok=True)
+    timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    exit_code = determine_exit_code(collection_reports)
+    report = RunReport(mode=mode, collections=collection_reports, exit_code=exit_code)
+    path = directory / f"integrity_{timestamp}.json"
+    atomic_write_json(path, report.to_dict())
+    return path
+
+
+def main(argv=None):
+    global config, base_output_path, current_collection_name, processing_log
+    args = parse_args(argv)
     config = load_config()
-    
-    # 解析输出路径
+
     if config.get('outputPath'):
         base_output_path = parse_output_path(config['outputPath'], config.get('os', ''))
         if base_output_path:
             print(f"使用自定义输出路径: {base_output_path}")
-            # 重新配置日志路径
             reconfigure_logging()
         else:
             print("输出路径解析失败，使用默认路径")
             base_output_path = None
     else:
         print("使用默认输出路径: downloads/")
-    
-    # 检查是否启用openCollection模式
-    open_collection_mode = config.get('openCollection', False)
-    
-    if open_collection_mode:
-        print("检测到openCollection模式已启用")
-        print("请先运行 python fetch_collections.py 获取收藏夹列表")
-        print("然后将config.json中的openCollection设为false，重新运行此程序")
-        sys.exit(1)
-    
-    # 常规模式：处理收藏夹下载
+
+    if config.get('openCollection', False):
+        print("检测到openCollection模式已启用，请先运行 fetch_collections.py")
+        return 2
+
     zhihu_collections = config.get('zhihuUrls', [])
-    
-    if not zhihu_collections:
+    if not isinstance(zhihu_collections, list) or not zhihu_collections:
         print("没有找到要处理的收藏夹配置")
-        print("提示：请运行 python fetch_collections.py 自动获取收藏夹列表")
-        sys.exit(1)
-    
+        return 2
+
+    print(f"运行模式: {args.mode.value}")
     print(f"共找到 {len(zhihu_collections)} 个收藏夹待处理")
-    
+    collection_reports = []
     for collection in zhihu_collections:
         collection_name = collection.get('name', '未命名收藏夹')
         collection_url = collection.get('url', '')
-        
         if not collection_url:
-            print(f"收藏夹 '{collection_name}' 缺少URL，跳过")
+            collection_reports.append({
+                "name": collection_name,
+                "url": collection_url,
+                "status": "config_error",
+                "collection": {"complete": False},
+                "items": [],
+            })
             continue
-        
         print(f"\n开始处理收藏夹: {collection_name}")
-        process_single_collection(collection_name, collection_url)
-    
-    print("\n所有收藏夹处理完毕!")
-    
-    # 保存处理日志
-    save_processing_log()
+        current_collection_name = collection_name
+        try:
+            report = export_collection_with_integrity(
+                collection_name,
+                collection_url,
+                mode=args.mode,
+            )
+        except ManifestSchemaError as exc:
+            report = {
+                "name": collection_name,
+                "url": collection_url,
+                "status": "manifest_error",
+                "collection": {"complete": False},
+                "items": [],
+                "issues": [{"code": "manifest_error", "message": str(exc)}],
+            }
+        except Exception as exc:
+            logging.error(f"收藏夹完整性导出失败: {collection_name}: {exc}")
+            logging.error(traceback.format_exc())
+            report = {
+                "name": collection_name,
+                "url": collection_url,
+                "status": "invalid",
+                "collection": {"complete": True},
+                "items": [],
+                "issues": [{"code": "collection_exception", "message": str(exc)}],
+            }
+        collection_reports.append(report)
+
+    report_path = save_integrity_report(collection_reports, args.mode)
+    exit_code = determine_exit_code(collection_reports)
+    verified = sum(
+        1
+        for collection in collection_reports
+        for item in collection.get("items", [])
+        if item.get("status") in {"downloaded", "repaired", "refreshed", "adopted", "audit_verified", "skipped_verified"}
+    )
+    failed = sum(
+        1
+        for collection in collection_reports
+        for item in collection.get("items", [])
+        if item.get("status") in {
+            "invalid", "metadata_failed", "source_failed", "render_failed",
+            "render_invalid", "final_invalid"
+        }
+    )
+    unsupported = sum(
+        len(collection.get("collection", {}).get("unsupported_items", []))
+        for collection in collection_reports
+    )
+    print("\n完整性处理完毕")
+    print(f"已验证支持内容: {verified}")
+    print(f"失败支持内容: {failed}")
+    print(f"不支持内容: {unsupported}")
+    print(f"完整性报告: {report_path}")
+    processing_log = collection_reports
+    return exit_code
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
 
 # def testMarkdownifySingleAnswer():
 #     url = "https://www.zhihu.com/question/506166712/answer/2271842801"
