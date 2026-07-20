@@ -9,6 +9,8 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -296,3 +298,157 @@ def validate_markdown(
         issues=issues,
         assets=assets,
     )
+
+
+class ManifestSchemaError(ValueError):
+    """Raised when an integrity manifest cannot be safely interpreted."""
+
+
+class ExportMode(str, Enum):
+    BALANCED = "balanced"
+    AUDIT = "audit"
+    AUDIT_REPAIR = "audit_repair"
+    FORCE = "force"
+
+
+class IntegrityAction(str, Enum):
+    SKIP_VERIFIED = "skip_verified"
+    FETCH_AND_VERIFY = "fetch_and_verify"
+    FETCH_AND_AUDIT = "fetch_and_audit"
+    FETCH_AND_WRITE = "fetch_and_write"
+
+
+@dataclass
+class IntegrityManifestStore:
+    path: Path
+    collection_id: str
+    collection_url: str = ""
+    records: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    @classmethod
+    def load(
+        cls,
+        path: str | Path,
+        expected_collection_id: str,
+        collection_url: str = "",
+    ) -> "IntegrityManifestStore":
+        manifest_path = Path(path)
+        if not manifest_path.exists():
+            return cls(manifest_path, str(expected_collection_id), collection_url, {})
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ManifestSchemaError(f"Cannot read integrity manifest: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ManifestSchemaError("Integrity manifest root must be an object")
+        if payload.get("schema_version") != SCHEMA_VERSION:
+            raise ManifestSchemaError(
+                f"Unsupported integrity manifest schema: {payload.get('schema_version')!r}"
+            )
+        collection_id = str(payload.get("collection_id", ""))
+        if collection_id != str(expected_collection_id):
+            raise ManifestSchemaError(
+                f"Manifest collection ID {collection_id!r} does not match {expected_collection_id!r}"
+            )
+        items = payload.get("items", {})
+        if not isinstance(items, dict):
+            raise ManifestSchemaError("Integrity manifest items must be an object")
+        return cls(
+            manifest_path,
+            collection_id,
+            str(payload.get("collection_url") or collection_url or ""),
+            items,
+        )
+
+    def save(self) -> None:
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "collection_id": self.collection_id,
+            "collection_url": self.collection_url,
+            "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "items": self.records,
+        }
+        atomic_write_json(self.path, payload)
+
+
+def local_record_is_intact(
+    record: dict[str, Any] | None,
+    markdown_path: str | Path,
+    assets_dir: str | Path,
+) -> bool:
+    if not record or record.get("status") != "verified":
+        return False
+    path = Path(markdown_path)
+    if not path.is_file() or not record.get("markdown_sha256"):
+        return False
+    try:
+        if sha256_file(path) != record["markdown_sha256"]:
+            return False
+    except OSError:
+        return False
+    asset_root = Path(assets_dir)
+    for asset in record.get("assets", []):
+        filename = asset.get("filename")
+        if not filename or asset.get("status") != "verified":
+            return False
+        asset_path = asset_root / filename
+        if not asset_path.is_file() or asset_path.stat().st_size <= 0:
+            return False
+        expected_size = asset.get("size")
+        if expected_size is not None and int(expected_size) != asset_path.stat().st_size:
+            return False
+    return True
+
+
+def decide_action(
+    mode: ExportMode,
+    *,
+    file_exists: bool,
+    record: dict[str, Any] | None,
+    local_intact: bool,
+    metadata: SourceMetadata,
+) -> IntegrityAction:
+    if mode == ExportMode.FORCE:
+        return IntegrityAction.FETCH_AND_WRITE
+    if mode in {ExportMode.AUDIT, ExportMode.AUDIT_REPAIR}:
+        return IntegrityAction.FETCH_AND_AUDIT
+    if not file_exists:
+        return IntegrityAction.FETCH_AND_WRITE
+    if not record:
+        return IntegrityAction.FETCH_AND_VERIFY
+    if not local_intact:
+        return IntegrityAction.FETCH_AND_WRITE
+    previous_updated = record.get("source_updated_time")
+    if metadata.updated_time is None:
+        if metadata.source_type == "article":
+            return IntegrityAction.FETCH_AND_VERIFY
+    elif previous_updated != metadata.updated_time:
+        return IntegrityAction.FETCH_AND_WRITE
+    return IntegrityAction.SKIP_VERIFIED
+
+
+def record_from_validation(
+    snapshot: SourceSnapshot,
+    markdown_path: str | Path,
+    markdown: str,
+    result: IntegrityResult,
+    title: str,
+) -> dict[str, Any]:
+    return {
+        "title": title,
+        "source_type": snapshot.metadata.source_type,
+        "source_id": snapshot.metadata.source_id,
+        "source_updated_time": snapshot.metadata.updated_time,
+        "source_candidate": snapshot.candidate,
+        "source_content_sha256": sha256_text(snapshot.html),
+        "source_text_length": sum(len(segment) for segment in snapshot.text_segments),
+        "source_image_count": len(snapshot.image_urls),
+        "markdown_path": Path(markdown_path).name,
+        "markdown_sha256": sha256_text(markdown),
+        "markdown_text_length": len(markdown_visible_text(markdown)),
+        "text_coverage": result.text_coverage,
+        "assets": result.assets,
+        "last_verified_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "status": result.status,
+        "issues": [issue.__dict__ for issue in result.issues],
+    }
