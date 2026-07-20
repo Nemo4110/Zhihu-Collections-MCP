@@ -543,3 +543,28 @@ class CollectionFetchResult:
             "page_failures": self.page_failures,
             "complete": self.complete,
         }
+
+
+class SourceContentError(ValueError):
+    """Raised when no usable source content candidate is available."""
+
+
+def choose_best_snapshot(candidates: list[SourceSnapshot] | tuple[SourceSnapshot, ...]) -> SourceSnapshot:
+    usable = [item for item in candidates if item.text_segments or item.image_urls]
+    if not usable:
+        raise SourceContentError("No usable source content candidate")
+    preference = {
+        "answer_api": 4,
+        "answer_initial_data": 3,
+        "article_initial_data": 3,
+        "answer_page": 2,
+        "article_page": 2,
+    }
+    return max(
+        usable,
+        key=lambda item: (
+            sum(len(segment) for segment in item.text_segments),
+            len(item.image_urls),
+            preference.get(item.candidate, 0),
+        ),
+    )
