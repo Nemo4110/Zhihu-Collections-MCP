@@ -20,13 +20,23 @@ from markdownify import MarkdownConverter
 
 from integrity import (
     CollectionFetchResult,
+    ExportMode,
+    IntegrityAction,
+    IntegrityManifestStore,
+    ManifestSchemaError,
     SourceContentError,
     SourceMetadata,
     SourceSnapshot,
+    atomic_write_text,
     canonicalize_url,
     choose_best_snapshot,
+    decide_action,
+    image_filename_from_url,
+    local_record_is_intact,
     parse_source_identity,
+    record_from_validation,
     snapshot_from_html,
+    validate_markdown,
 )
 
 
@@ -406,7 +416,7 @@ class ObsidianStyleConverter(MarkdownConverter):
                 text = kwargs.get('text', '')
             
             alt = el.attrs.get('alt', None) or ''
-            src = el.attrs.get('src', None) or ''
+            src = el.attrs.get('data-original', None) or el.attrs.get('src', None) or ''
 
             # 使用全局变量获取当前收藏夹名称
             global current_collection_name
@@ -417,8 +427,10 @@ class ObsidianStyleConverter(MarkdownConverter):
             if not os.path.exists(assetsDir):
                 os.makedirs(assetsDir)
 
-            img_content = requests.get(url=src, headers=headers, cookies=cookies).content
-            img_content_name = src.split('?')[0].split('/')[-1]
+            img_response = requests.get(url=src, headers=headers, cookies=cookies, timeout=30)
+            img_response.raise_for_status()
+            img_content = img_response.content
+            img_content_name = image_filename_from_url(src)
 
             imgPath = os.path.join(assetsDir,img_content_name)
             with open(imgPath, 'wb') as fp:
@@ -1212,6 +1224,222 @@ def flush_logs():
     # 强制刷新标准输出
     sys.stdout.flush()
     sys.stderr.flush()
+
+
+def _default_fetch_metadata(item):
+    if item.source_type == "answer":
+        return fetch_answer_metadata(item.url)
+    return SourceMetadata(item.url, item.source_type, item.source_id, None)
+
+
+def _default_render_markdown(snapshot, item):
+    body = markdownify(snapshot.html, heading_style="ATX")
+    return f"> {item.url}\n{body}"
+
+
+def export_item_with_integrity(
+    item,
+    collection_dir,
+    manifest,
+    mode=ExportMode.BALANCED,
+    fetch_metadata_fn=None,
+    fetch_snapshot_fn=None,
+    render_markdown_fn=None,
+):
+    """Verify, adopt, repair, or refresh one collection item."""
+    collection_path = pathlib.Path(collection_dir)
+    collection_path.mkdir(parents=True, exist_ok=True)
+    assets_dir = collection_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    fetch_metadata_fn = fetch_metadata_fn or _default_fetch_metadata
+    fetch_snapshot_fn = fetch_snapshot_fn or fetch_source_snapshot
+    render_markdown_fn = render_markdown_fn or _default_render_markdown
+
+    record = manifest.records.get(item.url)
+    if record and record.get("markdown_path"):
+        file_path = collection_path / record["markdown_path"]
+    else:
+        file_path = pathlib.Path(get_unique_filename(str(collection_path), item.title, item.url))
+
+    try:
+        metadata = fetch_metadata_fn(item)
+    except Exception as exc:
+        return {
+            "name": item.title,
+            "url": item.url,
+            "status": "metadata_failed",
+            "issues": [{"code": "metadata_failed", "message": str(exc)}],
+        }
+
+    local_intact = local_record_is_intact(record, file_path, assets_dir)
+    action = decide_action(
+        mode,
+        file_exists=file_path.exists(),
+        record=record,
+        local_intact=local_intact,
+        metadata=metadata,
+    )
+    if action == IntegrityAction.SKIP_VERIFIED:
+        return {
+            "name": item.title,
+            "url": item.url,
+            "status": "skipped_verified",
+            "action": action.value,
+            "markdown_path": file_path.name,
+            "issues": [],
+        }
+
+    try:
+        snapshot = fetch_snapshot_fn(item.url)
+    except Exception as exc:
+        return {
+            "name": item.title,
+            "url": item.url,
+            "status": "source_failed",
+            "action": action.value,
+            "issues": [{"code": "source_failed", "message": str(exc)}],
+        }
+
+    existing_result = None
+    existing_markdown = None
+    if file_path.exists():
+        try:
+            existing_markdown = file_path.read_text(encoding="utf-8")
+            existing_result = validate_markdown(snapshot, existing_markdown, assets_dir)
+        except OSError as exc:
+            existing_result = None
+            logging.warning(f"读取已有Markdown失败: {file_path}: {exc}")
+
+    if action in {IntegrityAction.FETCH_AND_VERIFY, IntegrityAction.FETCH_AND_AUDIT}:
+        if existing_result and existing_result.valid:
+            manifest.records[item.url] = record_from_validation(
+                snapshot,
+                file_path,
+                existing_markdown,
+                existing_result,
+                item.title,
+            )
+            status = "audit_verified" if mode in {ExportMode.AUDIT, ExportMode.AUDIT_REPAIR} else "adopted"
+            return {
+                "name": item.title,
+                "url": item.url,
+                "status": status,
+                "action": action.value,
+                "markdown_path": file_path.name,
+                "text_coverage": existing_result.text_coverage,
+                "issues": [],
+            }
+        if mode == ExportMode.AUDIT:
+            issues = existing_result.issues if existing_result else []
+            return {
+                "name": item.title,
+                "url": item.url,
+                "status": "invalid",
+                "action": action.value,
+                "markdown_path": file_path.name,
+                "issues": [issue.__dict__ for issue in issues],
+            }
+
+    try:
+        rendered = render_markdown_fn(snapshot, item)
+        rendered_result = validate_markdown(snapshot, rendered, assets_dir)
+    except Exception as exc:
+        return {
+            "name": item.title,
+            "url": item.url,
+            "status": "render_failed",
+            "action": action.value,
+            "issues": [{"code": "render_failed", "message": str(exc)}],
+        }
+    if not rendered_result.valid:
+        return {
+            "name": item.title,
+            "url": item.url,
+            "status": "render_invalid",
+            "action": action.value,
+            "issues": [issue.__dict__ for issue in rendered_result.issues],
+        }
+
+    atomic_write_text(file_path, rendered)
+    final_markdown = file_path.read_text(encoding="utf-8")
+    final_result = validate_markdown(snapshot, final_markdown, assets_dir)
+    if not final_result.valid:
+        return {
+            "name": item.title,
+            "url": item.url,
+            "status": "final_invalid",
+            "action": action.value,
+            "issues": [issue.__dict__ for issue in final_result.issues],
+        }
+    manifest.records[item.url] = record_from_validation(
+        snapshot,
+        file_path,
+        final_markdown,
+        final_result,
+        item.title,
+    )
+    if mode == ExportMode.FORCE:
+        status = "refreshed"
+    elif file_path.exists() and existing_markdown is not None:
+        status = "repaired"
+    else:
+        status = "downloaded"
+    return {
+        "name": item.title,
+        "url": item.url,
+        "status": status,
+        "action": action.value,
+        "markdown_path": file_path.name,
+        "text_coverage": final_result.text_coverage,
+        "issues": [],
+    }
+
+
+def export_collection_with_integrity(
+    collection_name,
+    collection_url,
+    mode=ExportMode.BALANCED,
+    fetch_result=None,
+):
+    """Export one collection and persist its manifest after each verified item."""
+    collection_id = collection_url.split('?')[0].rstrip('/').split('/')[-1]
+    result = fetch_result or fetch_collection_items(collection_id)
+    collection_report = {
+        "name": collection_name,
+        "url": collection_url,
+        "collection": result.to_dict(),
+        "items": [],
+    }
+    if not result.complete:
+        collection_report["status"] = "collection_incomplete"
+        return collection_report
+
+    collection_dir = pathlib.Path(get_output_path(collection_name))
+    collection_dir.mkdir(parents=True, exist_ok=True)
+    manifest = IntegrityManifestStore.load(
+        collection_dir / ".zhihu-integrity.json",
+        expected_collection_id=collection_id,
+        collection_url=collection_url,
+    )
+    for item in tqdm(result.exportable_items, desc=f"校验 {collection_name}"):
+        item_report = export_item_with_integrity(
+            item,
+            collection_dir,
+            manifest,
+            mode=mode,
+        )
+        collection_report["items"].append(item_report)
+        if item.url in manifest.records:
+            manifest.save()
+    failures = [
+        item for item in collection_report["items"]
+        if item["status"] in {
+            "metadata_failed", "source_failed", "render_failed", "render_invalid",
+            "final_invalid", "invalid"
+        }
+    ]
+    collection_report["status"] = "verified" if not failures else "invalid"
+    return collection_report
 
 def process_single_collection(collection_name, collection_url):
     """处理单个收藏夹"""
