@@ -111,5 +111,114 @@ class IntegrityValidationTests(unittest.TestCase):
         )
 
 
+    def test_rendered_src_is_preferred_over_data_original_for_asset_compatibility(self):
+        snapshot = snapshot_from_html(
+            self.metadata,
+            "answer_page",
+            '<img src="https://pic.zhimg.com/rendered_720w.jpg" data-original="https://pic.zhimg.com/original_r.jpg">',
+        )
+        self.assertEqual(
+            snapshot.image_urls,
+            ("https://pic.zhimg.com/rendered_720w.jpg",),
+        )
+
+    def test_data_placeholder_uses_data_original(self):
+        snapshot = snapshot_from_html(
+            self.metadata,
+            "answer_page",
+            '<img src="data:image/gif;base64,AAAA" data-original="https://pic.zhimg.com/real.jpg">',
+        )
+        self.assertEqual(snapshot.image_urls, ("https://pic.zhimg.com/real.jpg",))
+
+    def test_inline_markdown_formatting_does_not_reduce_text_coverage(self):
+        snapshot = snapshot_from_html(
+            self.metadata,
+            "answer_api",
+            "<p>新品机制算法正在全面演进。</p>",
+        )
+        markdown = (
+            "> https://www.zhihu.com/question/1/answer/2\n"
+            "新品 **机制算法** 正在全面演进。\n"
+        )
+        with workspace_directory() as assets_dir:
+            result = validate_markdown(snapshot, markdown, assets_dir)
+        self.assertTrue(result.valid, result.issues)
+        self.assertEqual(result.text_coverage, 1.0)
+
+    def test_markdown_math_escaping_does_not_reduce_coverage(self):
+        snapshot = snapshot_from_html(
+            self.metadata,
+            "article_page",
+            r"<p>预估 Potential\_score_{T+\Delta T} 并计算 \hat{y}_i 的结果。</p>",
+        )
+        markdown = (
+            "> https://www.zhihu.com/question/1/answer/2\n"
+            r"预估 Potential\\_score\_{T+\Delta T} 并计算 \hat{y}\_i 的结果。"
+        )
+        with workspace_directory() as assets_dir:
+            result = validate_markdown(snapshot, markdown, assets_dir)
+        self.assertTrue(result.valid, result.issues)
+        self.assertEqual(result.text_coverage, 1.0)
+
+    def test_author_numeric_prefix_without_space_is_preserved(self):
+        snapshot = snapshot_from_html(
+            self.metadata,
+            "answer_api",
+            "<p>1.召回侧：增加实时召回</p><p>2.粗排侧：样本去偏学习</p>",
+        )
+        markdown = (
+            "> https://www.zhihu.com/question/1/answer/2\n"
+            "1.召回侧：增加实时召回\n\n2.粗排侧：样本去偏学习"
+        )
+        with workspace_directory() as assets_dir:
+            result = validate_markdown(snapshot, markdown, assets_dir)
+        self.assertTrue(result.valid, result.issues)
+
+    def test_numbered_paragraph_with_space_matches_markdown(self):
+        snapshot = snapshot_from_html(
+            self.metadata,
+            "article_page",
+            "<p>1. 流式模型时时刻刻都在学习。</p><p>2. 批次模型按天更新。</p>",
+        )
+        markdown = (
+            "> https://www.zhihu.com/question/1/answer/2\n"
+            "1. **流式模型**时时刻刻都在学习。\n\n"
+            "2. 批次模型按天更新。"
+        )
+        with workspace_directory() as assets_dir:
+            result = validate_markdown(snapshot, markdown, assets_dir)
+        self.assertTrue(result.valid, result.issues)
+
+    def test_missing_middle_sentence_in_long_paragraph_is_detected(self):
+        source = (
+            "第一段句子用于确认开头完整。"
+            "第二段句子是必须保留的中间内容，并且长度足够用于完整性检测。"
+            "第三段句子用于确认结尾完整。"
+        )
+        snapshot = snapshot_from_html(self.metadata, "article_page", f"<p>{source}</p>")
+        markdown = (
+            "> https://www.zhihu.com/question/1/answer/2\n"
+            "第一段句子用于确认开头完整。第三段句子用于确认结尾完整。"
+        )
+        with workspace_directory() as assets_dir:
+            result = validate_markdown(snapshot, markdown, assets_dir)
+        self.assertFalse(result.valid)
+        self.assertLess(result.text_coverage, 0.98)
+
+    def test_short_heading_separated_by_image_is_validated_independently(self):
+        snapshot = snapshot_from_html(
+            self.metadata,
+            "article_page",
+            '<h2>3 实验</h2><img src="https://pic.zhimg.com/chart.jpg"><p>线上效果非常明显。</p>',
+        )
+        markdown = (
+            "> https://www.zhihu.com/question/1/answer/2\n"
+            "## 3 实验\n\n![[chart.jpg]]\n\n线上效果非常明显。"
+        )
+        with workspace_directory() as assets_dir:
+            (assets_dir / "chart.jpg").write_bytes(b"image")
+            result = validate_markdown(snapshot, markdown, assets_dir)
+        self.assertTrue(result.valid, result.issues)
+
 if __name__ == "__main__":
     unittest.main()

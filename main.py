@@ -35,6 +35,7 @@ from integrity import (
     choose_best_snapshot,
     decide_action,
     image_filename_from_url,
+    image_source_url,
     local_record_is_intact,
     parse_source_identity,
     record_from_validation,
@@ -121,9 +122,12 @@ def parse_output_path(path_str, os_type):
         return None
 
 # 读取cookies
-def load_cookies():
+def load_cookies(cookie_file=None):
+    cookie_path = pathlib.Path(
+        cookie_file or os.environ.get("ZHIHU_COOKIES_FILE", "cookies.json")
+    )
     try:
-        with open('cookies.json', 'r', encoding='utf-8') as f:
+        with cookie_path.open('r', encoding='utf-8') as f:
             cookies_list = json.load(f)
         cookies_dict = {}
         for cookie in cookies_list:
@@ -131,6 +135,9 @@ def load_cookies():
         return cookies_dict
     except FileNotFoundError:
         print("未找到cookies.json文件，将使用无登录模式访问（部分内容可能无法获取）")
+        return {}
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        print(f"cookies文件格式无效，将使用无登录模式访问: {exc}")
         return {}
 
 # 全局变量存储当前处理的收藏夹名称
@@ -419,7 +426,9 @@ class ObsidianStyleConverter(MarkdownConverter):
                 text = kwargs.get('text', '')
             
             alt = el.attrs.get('alt', None) or ''
-            src = el.attrs.get('data-original', None) or el.attrs.get('src', None) or ''
+            src = image_source_url(el)
+            if not src:
+                return ''
 
             # 使用全局变量获取当前收藏夹名称
             global current_collection_name
@@ -538,23 +547,37 @@ def markdownify(html, **options):
 
 
 # 获取收藏夹的回答总数
-def get_article_nums_of_collection(collection_id):
-    """
-    :param starturl: 收藏夹连接
-    :return: 收藏夹的页数
-    """
-    try:
-        collection_url = "https://www.zhihu.com/api/v4/collections/{}/items".format(collection_id)
-        html = requests.get(collection_url, headers=headers, cookies=cookies)
-        html.raise_for_status()
-
-        # 页面总数
-        result = html.json()['paging'].get('totals')
-        logging.info(f"收藏夹 {collection_id} 包含 {result} 个项目")
-        return result
-    except Exception as e:
-        logging.error(f"获取收藏夹 {collection_id} 总数失败: {str(e)}")
-        return 0
+def get_article_nums_of_collection(
+    collection_id,
+    request_get=None,
+    sleep=None,
+    attempts=3,
+    timeout=30,
+):
+    """Return the API-reported raw item total, or None after retries fail."""
+    request_get = request_get or requests.get
+    sleep = sleep or time.sleep
+    collection_url = f"https://www.zhihu.com/api/v4/collections/{collection_id}/items"
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            response = request_get(
+                collection_url,
+                headers=headers,
+                cookies=cookies,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            total = payload["paging"]["totals"]
+            logging.info(f"收藏夹 {collection_id} 包含 {total} 个项目")
+            return int(total)
+        except Exception as exc:
+            last_error = exc
+            if attempt < attempts - 1:
+                sleep(2 ** attempt)
+    logging.error(f"获取收藏夹 {collection_id} 总数失败: {last_error}")
+    return None
 
 
 # 解析出每个回答的具体链接
@@ -581,8 +604,13 @@ def fetch_collection_items(
         result.reconcile()
         return result
 
-    result = CollectionFetchResult(collection_id, int(expected_total or 0))
-    if result.expected_total <= 0:
+    if expected_total is None:
+        result = CollectionFetchResult(collection_id, 0)
+        result.page_failures.append({"offset": 0, "error": "collection_total_unavailable"})
+        result.reconcile()
+        return result
+    result = CollectionFetchResult(collection_id, int(expected_total))
+    if result.expected_total == 0:
         result.reconcile()
         return result
 
@@ -715,9 +743,7 @@ def parse_article_page_candidates(metadata, page_html):
     seen_html = set()
     selectors = (
         "div.Post-RichText",
-        "div.RichText",
-        "div.Post-content",
-        "div.ztext",
+        "div.Post-RichTextContainer > div.RichText",
         "div.Article-RichText",
         "[data-zop-editor]",
     )
@@ -1445,115 +1471,16 @@ def export_collection_with_integrity(
     return collection_report
 
 def process_single_collection(collection_name, collection_url):
-    """处理单个收藏夹"""
+    """Compatibility entry point used by the MCP server."""
     global current_collection_name, processing_log
     current_collection_name = collection_name
-    
-    logging.info(f"开始处理收藏夹: {collection_name}")
-    logging.info(f"收藏夹URL: {collection_url}")
-    flush_logs()
-    
-    try:
-        collection_id = collection_url.split('?')[0].split('/')[-1]
-        logging.info(f"解析得到收藏夹ID: {collection_id}")
-        flush_logs()
-        
-        urls, titles = get_article_urls_in_collection(collection_id)
-        
-        if not urls:
-            logging.warning(f"收藏夹 '{collection_name}' 没有获取到任何文章")
-            flush_logs()
-            return
-            
-    except Exception as e:
-        logging.error(f"处理收藏夹 '{collection_name}' 时发生错误: {str(e)}")
-        logging.error(f"错误详情: {traceback.format_exc()}")
-        flush_logs()
-        return
-    
-    # 初始化此收藏夹的日志记录
-    collection_log = {
-        "name": collection_name,
-        "url": collection_url,
-        "list": []
-    }
-    
-    # 验证数据一致性
-    if len(urls) != len(titles):
-        error_msg = f'地址标题列表长度不一致: urls={len(urls)}, titles={len(titles)}'
-        logging.error(error_msg)
-        flush_logs()
-        processing_log.append(collection_log)
-        return
-    
-    print(f"收藏夹 '{collection_name}' 共获取 {len(urls)} 篇可导出回答或专栏")
-    
-    downloadDir = get_output_path(collection_name)
-    if not os.path.exists(downloadDir):
-        os.makedirs(downloadDir)
-    
-    for i in tqdm(range(len(urls)), desc=f"处理 {collection_name}"):
-        content = None
-        url = urls[i]
-        title = titles[i]
-        
-        # 获取唯一的文件路径
-        file_path = get_unique_filename(downloadDir, title, url)
-        
-        # 初始化文章日志记录
-        article_log = {
-            "name": title,
-            "url": url,
-            "status": ""
-        }
-        
-        # 检查文件是否已存在且包含相同URL
-        if is_article_already_downloaded(file_path, url):
-            article_log["status"] = "文章已存在,跳过下载"
-            collection_log["list"].append(article_log)
-            continue
-        
-        try:
-            logging.info(f"开始下载文章: {title}")
-            flush_logs()
-            
-            if url.find('zhuanlan') != -1:
-                content = get_single_post_content(url)
-            else:
-                content = get_single_answer_content(url)
-            
-            if content == -1:
-                article_log["status"] = f"文章下载失败, 原因:获取内容失败"
-                collection_log["list"].append(article_log)
-                logging.warning(f"获取内容失败: {url}")
-                flush_logs()
-                continue
-            
-            md = markdownify(content, heading_style="ATX")
-            md = '> %s\n' % url + md
-            
-            with open(file_path, "w", encoding='utf-8') as md_file:
-                md_file.write(md)
-            
-            article_log["status"] = "文章不存在,正常下载"
-            collection_log["list"].append(article_log)
-            logging.info(f"文章下载成功: {title}")
-            flush_logs()
-            
-            # 添加延时
-            time.sleep(random.randint(1, 5))
-            
-        except Exception as e:
-            article_log["status"] = f"文章下载失败, 原因:{str(e)}"
-            collection_log["list"].append(article_log)
-            logging.error(f"下载文章时发生错误: {title}")
-            logging.error(f"错误详情: {str(e)}")
-            logging.error(f"URL: {url}")
-            flush_logs()
-    
-    # 将收藏夹日志添加到全局日志
-    processing_log.append(collection_log)
-    print(f"收藏夹 '{collection_name}' 下载完毕")
+    report = export_collection_with_integrity(
+        collection_name,
+        collection_url,
+        mode=ExportMode.BALANCED,
+    )
+    processing_log.append(report)
+    return report
 
 
 def parse_args(argv=None):

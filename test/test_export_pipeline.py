@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import shutil
 import unittest
+from unittest.mock import patch
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -127,6 +128,23 @@ class ExportPipelineTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), original)
             self.assertNotIn(self.url, store.records)
 
+
+    def test_process_single_collection_routes_to_integrity_pipeline(self):
+        report = {"name": "Example Collection", "status": "verified", "items": []}
+        main.processing_log = []
+        with patch.object(main, "export_collection_with_integrity", return_value=report) as export:
+            with patch.object(main, "get_article_urls_in_collection", return_value=([], [])):
+                returned = main.process_single_collection(
+                    "Example Collection",
+                    "https://www.zhihu.com/collection/1",
+                )
+        export.assert_called_once_with(
+            "Example Collection",
+            "https://www.zhihu.com/collection/1",
+            mode=ExportMode.BALANCED,
+        )
+        self.assertIs(returned, report)
+        self.assertEqual(main.processing_log, [report])
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -143,25 +144,31 @@ def normalize_visible_text(value: str) -> str:
 
 
 def _combine_short_segments(segments: list[str], minimum: int = 8) -> tuple[str, ...]:
-    combined: list[str] = []
-    pending = ""
-    for segment in segments:
-        current = normalize_visible_text(segment)
-        if not current:
+    # Keep block boundaries intact. Combining a short heading with the next
+    # paragraph can create a false gap when an image sits between them.
+    return tuple(
+        normalized
+        for segment in segments
+        if (normalized := normalize_visible_text(segment))
+    )
+
+
+def _fragment_text(value: str, max_length: int = 320) -> list[str]:
+    sentences = [
+        normalize_visible_text(part)
+        for part in re.split(r"(?<=[。！？!?；;])", value)
+        if normalize_visible_text(part)
+    ]
+    fragments: list[str] = []
+    for sentence in sentences or [normalize_visible_text(value)]:
+        if len(sentence) <= max_length:
+            fragments.append(sentence)
             continue
-        if pending:
-            current = normalize_visible_text(f"{pending} {current}")
-            pending = ""
-        if len(current) < minimum:
-            pending = current
-        else:
-            combined.append(current)
-    if pending:
-        if combined:
-            combined[-1] = normalize_visible_text(f"{combined[-1]} {pending}")
-        else:
-            combined.append(pending)
-    return tuple(combined)
+        start = 0
+        while start < len(sentence):
+            fragments.append(sentence[start:start + max_length])
+            start += max_length
+    return fragments
 
 
 def extract_text_segments(html: str) -> tuple[str, ...]:
@@ -174,7 +181,7 @@ def extract_text_segments(html: str) -> tuple[str, ...]:
             continue
         value = normalize_visible_text(element.get_text(" ", strip=True))
         if value:
-            values.append(value)
+            values.extend(_fragment_text(value))
     if not values:
         fallback = normalize_visible_text(soup.get_text(" ", strip=True))
         if fallback:
@@ -189,13 +196,21 @@ def image_filename_from_url(url: str) -> str:
     return f"image-{sha256_text(url)[:16]}.bin"
 
 
+def image_source_url(image: Any) -> str:
+    for attribute in ("src", "data-original"):
+        candidate = (image.get(attribute) or "").strip()
+        if candidate and not candidate.startswith("data:") and "data:image/svg+xml" not in candidate:
+            return candidate
+    return ""
+
+
 def extract_image_urls(html: str) -> tuple[str, ...]:
     soup = BeautifulSoup(html or "", "lxml")
     seen: set[str] = set()
     urls: list[str] = []
     for image in soup.find_all("img"):
-        src = (image.get("data-original") or image.get("src") or "").strip()
-        if not src or src.startswith("data:") or "data:image/svg+xml" in src:
+        src = image_source_url(image)
+        if not src:
             continue
         if src not in seen:
             seen.add(src)
@@ -223,17 +238,28 @@ def markdown_visible_text(markdown: str) -> str:
     value = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r" \1 ", value)
     value = re.sub(r"\[([^\]]+)\]\([^)]*\)", r" \1 ", value)
     value = re.sub(r"`{1,3}([^`]*)`{1,3}", r" \1 ", value, flags=re.DOTALL)
-    value = re.sub(r"(?m)^\s{0,3}(?:#{1,6}|>|[-+*]|\d+[.)])\s*", "", value)
+    value = re.sub(r"(?m)^\s{0,3}(?:#{1,6}\s+|>\s?|[-+*]\s+|\d+[.)]\s+)", "", value)
     value = value.translate(str.maketrans({char: " " for char in "*_~[]"}))
     return normalize_visible_text(value)
+
+
+def comparison_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", normalize_visible_text(value))
+    normalized = re.sub(r"^\s*\d+[.)、]\s*", "", normalized)
+    return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)
 
 
 def weighted_text_coverage(segments: tuple[str, ...], markdown_text: str) -> float:
     if not segments:
         return 1.0
-    normalized_markdown = normalize_visible_text(markdown_text)
-    total = sum(len(segment) for segment in segments)
-    covered = sum(len(segment) for segment in segments if segment in normalized_markdown)
+    comparable_markdown = comparison_text(markdown_text)
+    comparable_segments = [comparison_text(segment) for segment in segments]
+    total = sum(len(segment) for segment in comparable_segments)
+    covered = sum(
+        len(segment)
+        for segment in comparable_segments
+        if segment and segment in comparable_markdown
+    )
     return covered / total if total else 1.0
 
 
@@ -253,9 +279,10 @@ def validate_markdown(
     visible_markdown = markdown_visible_text(markdown)
     coverage = weighted_text_coverage(snapshot.text_segments, visible_markdown)
     if snapshot.text_segments:
-        if snapshot.text_segments[0] not in visible_markdown:
+        comparable_markdown = comparison_text(visible_markdown)
+        if comparison_text(snapshot.text_segments[0]) not in comparable_markdown:
             issues.append(IntegrityIssue("missing_first_segment", "First source text segment is missing"))
-        if snapshot.text_segments[-1] not in visible_markdown:
+        if comparison_text(snapshot.text_segments[-1]) not in comparable_markdown:
             issues.append(IntegrityIssue("missing_last_segment", "Last source text segment is missing"))
         if coverage < threshold:
             issues.append(
@@ -526,6 +553,7 @@ class CollectionFetchResult:
         )
         self.complete = (
             not self.page_failures
+            and not self.malformed_items
             and self.raw_item_count == self.expected_total
             and classified == self.raw_item_count
         )

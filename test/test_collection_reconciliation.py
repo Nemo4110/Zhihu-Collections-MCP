@@ -122,5 +122,74 @@ class CollectionReconciliationTests(unittest.TestCase):
         self.assertEqual(result.raw_item_count, 1)
 
 
+    def test_malformed_supported_item_makes_collection_incomplete(self):
+        payload = {
+            "data": [
+                {"content": {"type": "article", "url": "https://zhuanlan.zhihu.com/p/7"}}
+            ]
+        }
+        result = main.fetch_collection_items(
+            "123",
+            request_get=lambda *args, **kwargs: FakeResponse(payload),
+            get_total=lambda _: 1,
+            sleep=lambda _: None,
+        )
+        self.assertFalse(result.complete)
+        self.assertEqual(len(result.malformed_items), 1)
+
+    def test_total_request_failure_is_incomplete(self):
+        def get_total(_):
+            raise RuntimeError("total unavailable")
+
+        result = main.fetch_collection_items(
+            "123",
+            request_get=lambda *args, **kwargs: FakeResponse({"data": []}),
+            get_total=get_total,
+            sleep=lambda _: None,
+        )
+        self.assertFalse(result.complete)
+        self.assertEqual(len(result.page_failures), 1)
+
+    def test_collection_total_retries_and_returns_none_on_failure(self):
+        attempts = []
+
+        def request_get(url, **kwargs):
+            attempts.append(url)
+            return FakeResponse(error=RuntimeError("total down"))
+
+        total = main.get_article_nums_of_collection(
+            "123",
+            request_get=request_get,
+            sleep=lambda _: None,
+            attempts=3,
+        )
+        self.assertIsNone(total)
+        self.assertEqual(len(attempts), 3)
+
+    def test_collection_total_uses_timeout_and_reads_paging_total(self):
+        seen = {}
+
+        def request_get(url, **kwargs):
+            seen.update(kwargs)
+            return FakeResponse({"paging": {"totals": 7}})
+
+        total = main.get_article_nums_of_collection(
+            "123",
+            request_get=request_get,
+            sleep=lambda _: None,
+        )
+        self.assertEqual(total, 7)
+        self.assertEqual(seen["timeout"], 30)
+
+    def test_none_total_is_incomplete(self):
+        result = main.fetch_collection_items(
+            "123",
+            request_get=lambda *args, **kwargs: FakeResponse({"data": []}),
+            get_total=lambda _: None,
+            sleep=lambda _: None,
+        )
+        self.assertFalse(result.complete)
+        self.assertEqual(result.page_failures[0]["error"], "collection_total_unavailable")
+
 if __name__ == "__main__":
     unittest.main()

@@ -136,5 +136,16 @@ class SourceCandidateTests(unittest.TestCase):
         self.assertEqual({item.candidate for item in snapshots}, {"answer_api", "answer_page"})
 
 
+    def test_article_parser_does_not_select_outer_footer_container(self):
+        html = (
+            '<div class="Post-content">'
+            '<div class="Post-RichText"><p>Actual article body with required ending.</p></div>'
+            '<div class="Footer"><p>Footer navigation repeated repeated repeated repeated.</p></div>'
+            '</div>'
+        )
+        best = choose_best_snapshot(main.parse_article_page_candidates(self.article_metadata, html))
+        self.assertIn("Actual article body", best.html)
+        self.assertNotIn("Footer navigation", best.html)
+
 if __name__ == "__main__":
     unittest.main()
