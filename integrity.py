@@ -11,7 +11,9 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
+
+from bs4 import BeautifulSoup
 
 SCHEMA_VERSION = 1
 TEXT_COVERAGE_THRESHOLD = 0.98
@@ -125,4 +127,172 @@ def atomic_write_json(path: str | Path, value: Any) -> None:
     atomic_write_text(
         path,
         json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+
+
+_ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
+_WHITESPACE_RE = re.compile(r"\s+")
+_CONTENT_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote", "td", "th", "pre")
+
+
+def normalize_visible_text(value: str) -> str:
+    value = _ZERO_WIDTH_RE.sub("", value or "")
+    return _WHITESPACE_RE.sub(" ", value).strip()
+
+
+def _combine_short_segments(segments: list[str], minimum: int = 8) -> tuple[str, ...]:
+    combined: list[str] = []
+    pending = ""
+    for segment in segments:
+        current = normalize_visible_text(segment)
+        if not current:
+            continue
+        if pending:
+            current = normalize_visible_text(f"{pending} {current}")
+            pending = ""
+        if len(current) < minimum:
+            pending = current
+        else:
+            combined.append(current)
+    if pending:
+        if combined:
+            combined[-1] = normalize_visible_text(f"{combined[-1]} {pending}")
+        else:
+            combined.append(pending)
+    return tuple(combined)
+
+
+def extract_text_segments(html: str) -> tuple[str, ...]:
+    soup = BeautifulSoup(html or "", "lxml")
+    for element in soup.find_all(("script", "style")):
+        element.decompose()
+    values: list[str] = []
+    for element in soup.find_all(_CONTENT_TAGS):
+        if element.find(_CONTENT_TAGS):
+            continue
+        value = normalize_visible_text(element.get_text(" ", strip=True))
+        if value:
+            values.append(value)
+    if not values:
+        fallback = normalize_visible_text(soup.get_text(" ", strip=True))
+        if fallback:
+            values.append(fallback)
+    return _combine_short_segments(values)
+
+
+def image_filename_from_url(url: str) -> str:
+    name = Path(unquote(urlsplit(url).path)).name
+    if name:
+        return name
+    return f"image-{sha256_text(url)[:16]}.bin"
+
+
+def extract_image_urls(html: str) -> tuple[str, ...]:
+    soup = BeautifulSoup(html or "", "lxml")
+    seen: set[str] = set()
+    urls: list[str] = []
+    for image in soup.find_all("img"):
+        src = (image.get("data-original") or image.get("src") or "").strip()
+        if not src or src.startswith("data:") or "data:image/svg+xml" in src:
+            continue
+        if src not in seen:
+            seen.add(src)
+            urls.append(src)
+    return tuple(urls)
+
+
+def snapshot_from_html(
+    metadata: SourceMetadata,
+    candidate: str,
+    html: str,
+) -> SourceSnapshot:
+    return SourceSnapshot(
+        metadata=metadata,
+        candidate=candidate,
+        html=html,
+        text_segments=extract_text_segments(html),
+        image_urls=extract_image_urls(html),
+    )
+
+
+def markdown_visible_text(markdown: str) -> str:
+    value = markdown or ""
+    value = re.sub(r"!\[\[([^\]]+)\]\]", r" \1 ", value)
+    value = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r" \1 ", value)
+    value = re.sub(r"\[([^\]]+)\]\([^)]*\)", r" \1 ", value)
+    value = re.sub(r"`{1,3}([^`]*)`{1,3}", r" \1 ", value, flags=re.DOTALL)
+    value = re.sub(r"(?m)^\s{0,3}(?:#{1,6}|>|[-+*]|\d+[.)])\s*", "", value)
+    value = value.translate(str.maketrans({char: " " for char in "*_~[]"}))
+    return normalize_visible_text(value)
+
+
+def weighted_text_coverage(segments: tuple[str, ...], markdown_text: str) -> float:
+    if not segments:
+        return 1.0
+    normalized_markdown = normalize_visible_text(markdown_text)
+    total = sum(len(segment) for segment in segments)
+    covered = sum(len(segment) for segment in segments if segment in normalized_markdown)
+    return covered / total if total else 1.0
+
+
+def validate_markdown(
+    snapshot: SourceSnapshot,
+    markdown: str,
+    assets_dir: str | Path,
+    threshold: float = TEXT_COVERAGE_THRESHOLD,
+) -> IntegrityResult:
+    issues: list[IntegrityIssue] = []
+    assets: list[dict[str, Any]] = []
+    if not (markdown or "").strip():
+        issues.append(IntegrityIssue("empty_markdown", "Markdown file is empty"))
+    if snapshot.metadata.canonical_url not in markdown:
+        issues.append(IntegrityIssue("missing_source_url", "Canonical source URL is missing"))
+
+    visible_markdown = markdown_visible_text(markdown)
+    coverage = weighted_text_coverage(snapshot.text_segments, visible_markdown)
+    if snapshot.text_segments:
+        if snapshot.text_segments[0] not in visible_markdown:
+            issues.append(IntegrityIssue("missing_first_segment", "First source text segment is missing"))
+        if snapshot.text_segments[-1] not in visible_markdown:
+            issues.append(IntegrityIssue("missing_last_segment", "Last source text segment is missing"))
+        if coverage < threshold:
+            issues.append(
+                IntegrityIssue(
+                    "low_text_coverage",
+                    f"Text coverage {coverage:.4f} is below {threshold:.4f}",
+                )
+            )
+    elif not snapshot.image_urls:
+        issues.append(IntegrityIssue("empty_source", "Source contains no visible text or images"))
+
+    asset_root = Path(assets_dir)
+    for image_url in snapshot.image_urls:
+        filename = image_filename_from_url(image_url)
+        asset_path = asset_root / filename
+        if filename not in markdown:
+            status = "missing_reference"
+            issues.append(IntegrityIssue("missing_asset_reference", f"Markdown does not reference {filename}"))
+        elif not asset_path.exists():
+            status = "missing"
+            issues.append(IntegrityIssue("missing_asset", f"Missing asset {filename}"))
+        elif asset_path.stat().st_size <= 0:
+            status = "empty"
+            issues.append(IntegrityIssue("empty_asset", f"Empty asset {filename}"))
+        else:
+            status = "verified"
+        assets.append(
+            {
+                "url": image_url,
+                "filename": filename,
+                "size": asset_path.stat().st_size if asset_path.exists() else 0,
+                "status": status,
+            }
+        )
+
+    return IntegrityResult(
+        valid=not issues,
+        status="verified" if not issues else "invalid",
+        text_coverage=coverage,
+        issues=issues,
+        assets=assets,
     )
