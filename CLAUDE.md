@@ -28,6 +28,7 @@ Export-Zhihu-Collections 是一个将知乎收藏夹导出为 Markdown 格式的
   - `get_collections_from_page()`: 从知乎页面解析收藏夹信息
   - `update_config_with_collections()`: 自动更新配置文件
 - **utils.py**: 包含用于文件名清理的 `filter_title_str()` 函数
+- **integrity.py**: 导出完整性核心模块，负责规范 URL、源内容/Markdown 哈希、文本覆盖率、图片清单、原子写入、完整性清单、刷新策略和运行报告
 - **config.json**: 主配置文件，包含收藏夹列表、输出路径和系统设置
 - **config_examples.json**: 各种操作系统的配置示例
 - **zhihuUrls.json**: 旧版收藏夹URL列表文件（向后兼容）
@@ -54,6 +55,26 @@ Export-Zhihu-Collections 是一个将知乎收藏夹导出为 Markdown 格式的
 # 安装依赖
 pip install -r requirements.txt
 ```
+
+
+### 完整性模式
+```bash
+# 平衡模式：只刷新远端更新、本地异常或尚未建立清单的内容
+python main.py
+
+# 严格只读审计
+python main.py --audit
+
+# 严格审计并自动修复
+python main.py --audit --repair
+
+# 强制刷新全部支持内容
+python main.py --force
+```
+
+每个收藏夹目录包含 `.zhihu-integrity.json`；每次运行在输出目录的 `logs/` 下生成 `integrity_*.json`。支持内容验证失败返回 1，配置/分页/清单结构失败返回 2。`pin`/想法会明确报告为不支持类型，但不会导致其他回答和专栏失败。
+
+隔离 worktree 可通过 `ZHIHU_COOKIES_FILE` 引用主检出中被忽略的 Cookie 文件，禁止将 Cookie 内容写入代码、测试、日志或 Git。
 
 ### 配置和运行
 ```bash
