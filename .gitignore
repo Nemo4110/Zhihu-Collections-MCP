@@ -19,3 +19,6 @@ cookies.json
 .venv/
 
 output/
+
+# Test scratch space
+.test-tmp/
