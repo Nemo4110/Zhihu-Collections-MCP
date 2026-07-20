@@ -452,3 +452,94 @@ def record_from_validation(
         "status": result.status,
         "issues": [issue.__dict__ for issue in result.issues],
     }
+
+
+@dataclass(frozen=True)
+class CollectionItem:
+    title: str
+    url: str
+    source_type: str
+    source_id: str
+
+
+@dataclass(frozen=True)
+class UnsupportedItem:
+    source_type: str
+    url: str
+    reason: str
+
+
+@dataclass
+class CollectionFetchResult:
+    collection_id: str
+    expected_total: int
+    raw_item_count: int = 0
+    exportable_items: list[CollectionItem] = field(default_factory=list)
+    unsupported_items: list[UnsupportedItem] = field(default_factory=list)
+    malformed_items: list[dict[str, Any]] = field(default_factory=list)
+    duplicate_urls: list[str] = field(default_factory=list)
+    page_failures: list[dict[str, Any]] = field(default_factory=list)
+    complete: bool = False
+    _seen_urls: set[str] = field(default_factory=set, repr=False)
+
+    def add_raw_item(self, raw_item: Any) -> None:
+        self.raw_item_count += 1
+        if not isinstance(raw_item, dict) or not isinstance(raw_item.get("content"), dict):
+            self.malformed_items.append({"reason": "missing_content"})
+            return
+        content = raw_item["content"]
+        source_type = str(content.get("type") or "unknown")
+        url = str(content.get("url") or "")
+        if source_type not in {"answer", "article"}:
+            self.unsupported_items.append(
+                UnsupportedItem(source_type, url, "unsupported_content_type")
+            )
+            return
+        try:
+            if source_type == "answer":
+                title = str(content["question"]["title"])
+            else:
+                title = str(content["title"])
+            canonical_url = canonicalize_url(url)
+            parsed_type, source_id = parse_source_identity(canonical_url)
+            if parsed_type != source_type:
+                raise ValueError(f"type mismatch: {source_type} != {parsed_type}")
+        except (KeyError, TypeError, ValueError) as exc:
+            self.malformed_items.append(
+                {"type": source_type, "url": url, "reason": str(exc)}
+            )
+            return
+        if canonical_url in self._seen_urls:
+            self.duplicate_urls.append(canonical_url)
+            return
+        self._seen_urls.add(canonical_url)
+        self.exportable_items.append(
+            CollectionItem(title, canonical_url, source_type, source_id)
+        )
+
+    def reconcile(self) -> bool:
+        classified = (
+            len(self.exportable_items)
+            + len(self.unsupported_items)
+            + len(self.malformed_items)
+            + len(self.duplicate_urls)
+        )
+        self.complete = (
+            not self.page_failures
+            and self.raw_item_count == self.expected_total
+            and classified == self.raw_item_count
+        )
+        return self.complete
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "collection_id": self.collection_id,
+            "expected_total": self.expected_total,
+            "raw_item_count": self.raw_item_count,
+            "exportable_count": len(self.exportable_items),
+            "unsupported_items": [item.__dict__ for item in self.unsupported_items],
+            "malformed_items": self.malformed_items,
+            "duplicate_urls": self.duplicate_urls,
+            "page_failures": self.page_failures,
+            "complete": self.complete,
+        }

@@ -17,6 +17,8 @@ import pathlib
 
 from markdownify import MarkdownConverter
 
+from integrity import CollectionFetchResult
+
 
 # 读取配置文件
 def load_config():
@@ -531,60 +533,93 @@ def get_article_nums_of_collection(collection_id):
 
 
 # 解析出每个回答的具体链接
-def get_article_urls_in_collection(collection_id):
-    collection_id = collection_id.replace('\n','')
-    logging.info(f"开始获取收藏夹 {collection_id} 的文章列表")
+def fetch_collection_items(
+    collection_id,
+    request_get=None,
+    get_total=None,
+    sleep=None,
+    attempts=3,
+    timeout=30,
+):
+    """Fetch and reconcile every raw collection item."""
+    collection_id = str(collection_id).replace('\n', '')
+    request_get = request_get or requests.get
+    get_total = get_total or get_article_nums_of_collection
+    sleep = sleep or time.sleep
+    logging.info(f"开始获取收藏夹 {collection_id} 的完整项目列表")
 
-    offset = 0
+    try:
+        expected_total = get_total(collection_id)
+    except Exception as exc:
+        result = CollectionFetchResult(collection_id, 0)
+        result.page_failures.append({"offset": 0, "error": str(exc)})
+        result.reconcile()
+        return result
+
+    result = CollectionFetchResult(collection_id, int(expected_total or 0))
+    if result.expected_total <= 0:
+        result.reconcile()
+        return result
+
     limit = 20
-
-    article_nums = get_article_nums_of_collection(collection_id)
-    
-    if article_nums is None or article_nums == 0:
-        logging.warning(f"收藏夹 {collection_id} 没有文章或获取失败")
-        return [], []
-
-    url_list = []
-    title_list = []
-    while offset < article_nums:
-        collection_url = "https://www.zhihu.com/api/v4/collections/{}/items?offset={}&limit={}".format(collection_id,
-                                                                                                       offset, limit)
-        try:
-            logging.info(f"请求收藏夹API: offset={offset}, limit={limit}")
-            html = requests.get(collection_url, headers=headers, cookies=cookies)
-            html.raise_for_status()
-            content = html.json()
-            logging.info(f"成功获取 {len(content.get('data', []))} 个项目")
-        except Exception as e:
-            logging.error(f"请求收藏夹API失败: {str(e)}")
-            # 返回已获取的内容而不是None
-            return url_list, title_list
-
-        for el in content.get('data', []):
+    for offset in range(0, result.expected_total, limit):
+        collection_url = (
+            f"https://www.zhihu.com/api/v4/collections/{collection_id}/items"
+            f"?offset={offset}&limit={limit}"
+        )
+        payload = None
+        last_error = None
+        for attempt in range(attempts):
             try:
-                url_list.append(el['content']['url'])
-                if el['content']['type'] == 'answer':
-                    title_list.append(el['content']['question']['title'])
-                else:
-                    title_list.append(el['content']['title'])
-                logging.debug(f"添加文章: {el['content'].get('title', '未知标题')}")
-            except Exception as e:
-                logging.warning(f"解析文章项目失败: {str(e)}")
-                print('********')
-                print('TBD 非回答, 非专栏, 想法类收藏暂时无法处理')
-                for k, v in el['content'].items():
-                    if k in ['type', 'url']:
-                        print(k, v)
-                print('********')
-                # 如果已经添加了URL，需要移除对应的URL
-                if len(url_list) > len(title_list):
-                    url_list.pop()
+                logging.info(
+                    f"请求收藏夹API: offset={offset}, limit={limit}, attempt={attempt + 1}"
+                )
+                response = request_get(
+                    collection_url,
+                    headers=headers,
+                    cookies=cookies,
+                    timeout=timeout,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload, dict) or not isinstance(payload.get('data'), list):
+                    raise ValueError("收藏夹API响应缺少data数组")
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt < attempts - 1:
+                    sleep(2 ** attempt)
+        if payload is None:
+            result.page_failures.append({"offset": offset, "error": str(last_error)})
+            break
+        logging.info(f"成功获取 {len(payload['data'])} 个原始项目")
+        for raw_item in payload['data']:
+            result.add_raw_item(raw_item)
 
-        offset += limit
+    result.reconcile()
+    if result.complete:
+        logging.info(
+            f"收藏夹 {collection_id} 完整获取: raw={result.raw_item_count}, "
+            f"exportable={len(result.exportable_items)}, "
+            f"unsupported={len(result.unsupported_items)}"
+        )
+    else:
+        logging.error(
+            f"收藏夹 {collection_id} 获取不完整: expected={result.expected_total}, "
+            f"raw={result.raw_item_count}, failures={result.page_failures}"
+        )
+    return result
 
-    logging.info(f"收藏夹 {collection_id} 总共获取到 {len(url_list)} 个有效文章")
-    return url_list, title_list
 
+def get_article_urls_in_collection(collection_id):
+    """Compatibility wrapper returning URL/title lists for existing MCP tools."""
+    result = fetch_collection_items(collection_id)
+    if not result.complete:
+        return [], []
+    return (
+        [item.url for item in result.exportable_items],
+        [item.title for item in result.exportable_items],
+    )
 
 # 获得单条答案的数据
 def get_single_answer_content(answer_url):
