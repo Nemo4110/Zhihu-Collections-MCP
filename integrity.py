@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 import hashlib
 import json
 import os
@@ -16,10 +17,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 SCHEMA_VERSION = 1
 TEXT_COVERAGE_THRESHOLD = 0.98
+TEXT_COVERAGE_WARNING_THRESHOLD = 0.90
+ENDPOINT_SEGMENT_THRESHOLD = 0.90
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,7 @@ class IntegrityResult:
     status: str
     text_coverage: float
     issues: list[IntegrityIssue] = field(default_factory=list)
+    warnings: list[IntegrityIssue] = field(default_factory=list)
     assets: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -171,6 +175,25 @@ def _fragment_text(value: str, max_length: int = 320) -> list[str]:
     return fragments
 
 
+def _element_text_parts(element) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+
+    def flush() -> None:
+        value = normalize_visible_text(" ".join(current))
+        if value:
+            parts.append(value)
+        current.clear()
+
+    for descendant in element.descendants:
+        if isinstance(descendant, NavigableString):
+            current.append(str(descendant))
+        elif getattr(descendant, "name", None) in {"img", "br"}:
+            flush()
+    flush()
+    return parts
+
+
 def extract_text_segments(html: str) -> tuple[str, ...]:
     soup = BeautifulSoup(html or "", "lxml")
     for element in soup.find_all(("script", "style")):
@@ -179,15 +202,12 @@ def extract_text_segments(html: str) -> tuple[str, ...]:
     for element in soup.find_all(_CONTENT_TAGS):
         if element.find(_CONTENT_TAGS):
             continue
-        value = normalize_visible_text(element.get_text(" ", strip=True))
-        if value:
-            values.extend(_fragment_text(value))
+        for value in _element_text_parts(element):
+            values.extend(_fragment_text(value, max_length=160))
     if not values:
-        fallback = normalize_visible_text(soup.get_text(" ", strip=True))
-        if fallback:
-            values.append(fallback)
+        for value in _element_text_parts(soup):
+            values.extend(_fragment_text(value, max_length=160))
     return _combine_short_segments(values)
-
 
 def image_filename_from_url(url: str) -> str:
     name = Path(unquote(urlsplit(url).path)).name
@@ -234,8 +254,12 @@ def snapshot_from_html(
 
 def markdown_visible_text(markdown: str) -> str:
     value = markdown or ""
-    value = re.sub(r"!\[\[([^\]]+)\]\]", r" \1 ", value)
-    value = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r" \1 ", value)
+    value = re.sub(
+        r"!\[\[[^\r\n]+\]\](?:[ \t]*\r?\n\([^\r\n]*\))?",
+        " ",
+        value,
+    )
+    value = re.sub(r"!\[.*?\]\([^\r\n]*\)", " ", value)
     value = re.sub(r"\[([^\]]+)\]\([^)]*\)", r" \1 ", value)
     value = re.sub(r"`{1,3}([^`]*)`{1,3}", r" \1 ", value, flags=re.DOTALL)
     value = re.sub(r"(?m)^\s{0,3}(?:#{1,6}\s+|>\s?|[-+*]\s+|\d+[.)]\s+)", "", value)
@@ -249,18 +273,42 @@ def comparison_text(value: str) -> str:
     return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)
 
 
+def _segment_coverage(segment: str, comparable_markdown: str) -> float:
+    comparable_segment = comparison_text(segment)
+    if not comparable_segment:
+        return 1.0
+    if comparable_segment in comparable_markdown:
+        return 1.0
+    matcher = SequenceMatcher(
+        None,
+        comparable_segment,
+        comparable_markdown,
+        autojunk=False,
+    )
+    blocks = [block for block in matcher.get_matching_blocks() if block.size]
+    if not blocks:
+        return 0.0
+    matched = sum(block.size for block in blocks)
+    span = blocks[-1].b + blocks[-1].size - blocks[0].b
+    sequence_coverage = matched / len(comparable_segment)
+    match_density = matched / span if span else 0.0
+    return min(sequence_coverage * match_density, 1.0)
+
+
 def weighted_text_coverage(segments: tuple[str, ...], markdown_text: str) -> float:
     if not segments:
         return 1.0
     comparable_markdown = comparison_text(markdown_text)
-    comparable_segments = [comparison_text(segment) for segment in segments]
-    total = sum(len(segment) for segment in comparable_segments)
-    covered = sum(
-        len(segment)
-        for segment in comparable_segments
-        if segment and segment in comparable_markdown
-    )
-    return covered / total if total else 1.0
+    weighted_total = 0.0
+    total = 0
+    for segment in segments:
+        comparable_segment = comparison_text(segment)
+        length = len(comparable_segment)
+        if not length:
+            continue
+        weighted_total += length * _segment_coverage(segment, comparable_markdown)
+        total += length
+    return weighted_total / total if total else 1.0
 
 
 def validate_markdown(
@@ -268,8 +316,10 @@ def validate_markdown(
     markdown: str,
     assets_dir: str | Path,
     threshold: float = TEXT_COVERAGE_THRESHOLD,
+    warning_threshold: float = TEXT_COVERAGE_WARNING_THRESHOLD,
 ) -> IntegrityResult:
     issues: list[IntegrityIssue] = []
+    warnings: list[IntegrityIssue] = []
     assets: list[dict[str, Any]] = []
     if not (markdown or "").strip():
         issues.append(IntegrityIssue("empty_markdown", "Markdown file is empty"))
@@ -277,20 +327,21 @@ def validate_markdown(
         issues.append(IntegrityIssue("missing_source_url", "Canonical source URL is missing"))
 
     visible_markdown = markdown_visible_text(markdown)
+    comparable_markdown = comparison_text(visible_markdown)
     coverage = weighted_text_coverage(snapshot.text_segments, visible_markdown)
     if snapshot.text_segments:
-        comparable_markdown = comparison_text(visible_markdown)
-        if comparison_text(snapshot.text_segments[0]) not in comparable_markdown:
+        if _segment_coverage(snapshot.text_segments[0], comparable_markdown) < ENDPOINT_SEGMENT_THRESHOLD:
             issues.append(IntegrityIssue("missing_first_segment", "First source text segment is missing"))
-        if comparison_text(snapshot.text_segments[-1]) not in comparable_markdown:
+        if _segment_coverage(snapshot.text_segments[-1], comparable_markdown) < ENDPOINT_SEGMENT_THRESHOLD:
             issues.append(IntegrityIssue("missing_last_segment", "Last source text segment is missing"))
-        if coverage < threshold:
-            issues.append(
-                IntegrityIssue(
-                    "low_text_coverage",
-                    f"Text coverage {coverage:.4f} is below {threshold:.4f}",
-                )
-            )
+        coverage_issue = IntegrityIssue(
+            "low_text_coverage",
+            f"Text coverage {coverage:.4f} is below {threshold:.4f}",
+        )
+        if coverage < warning_threshold:
+            issues.append(coverage_issue)
+        elif coverage < threshold:
+            warnings.append(coverage_issue)
     elif not snapshot.image_urls:
         issues.append(IntegrityIssue("empty_source", "Source contains no visible text or images"))
 
@@ -318,14 +369,20 @@ def validate_markdown(
             }
         )
 
+    if issues:
+        status = "invalid"
+    elif warnings:
+        status = "verified_with_warnings"
+    else:
+        status = "verified"
     return IntegrityResult(
         valid=not issues,
-        status="verified" if not issues else "invalid",
+        status=status,
         text_coverage=coverage,
         issues=issues,
+        warnings=warnings,
         assets=assets,
     )
-
 
 class ManifestSchemaError(ValueError):
     """Raised when an integrity manifest cannot be safely interpreted."""
@@ -403,7 +460,7 @@ def local_record_is_intact(
     markdown_path: str | Path,
     assets_dir: str | Path,
 ) -> bool:
-    if not record or record.get("status") != "verified":
+    if not record or record.get("status") not in {"verified", "verified_with_warnings"}:
         return False
     path = Path(markdown_path)
     if not path.is_file() or not record.get("markdown_sha256"):
@@ -478,6 +535,7 @@ def record_from_validation(
         "last_verified_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "status": result.status,
         "issues": [issue.__dict__ for issue in result.issues],
+        "warnings": [warning.__dict__ for warning in result.warnings],
     }
 
 
@@ -506,6 +564,8 @@ class CollectionFetchResult:
     malformed_items: list[dict[str, Any]] = field(default_factory=list)
     duplicate_urls: list[str] = field(default_factory=list)
     page_failures: list[dict[str, Any]] = field(default_factory=list)
+    reached_end: bool = False
+    total_mismatch: dict[str, int] | None = None
     complete: bool = False
     _seen_urls: set[str] = field(default_factory=set, repr=False)
 
@@ -551,10 +611,20 @@ class CollectionFetchResult:
             + len(self.malformed_items)
             + len(self.duplicate_urls)
         )
+        total_matches = self.raw_item_count == self.expected_total
+        end_reconciles_gap = (
+            self.reached_end
+            and 0 < self.raw_item_count < self.expected_total
+        )
+        self.total_mismatch = (
+            {"expected": self.expected_total, "actual": self.raw_item_count}
+            if end_reconciles_gap
+            else None
+        )
         self.complete = (
             not self.page_failures
             and not self.malformed_items
-            and self.raw_item_count == self.expected_total
+            and (total_matches or end_reconciles_gap)
             and classified == self.raw_item_count
         )
         return self.complete
@@ -569,6 +639,8 @@ class CollectionFetchResult:
             "malformed_items": self.malformed_items,
             "duplicate_urls": self.duplicate_urls,
             "page_failures": self.page_failures,
+            "reached_end": self.reached_end,
+            "total_mismatch": self.total_mismatch,
             "complete": self.complete,
         }
 

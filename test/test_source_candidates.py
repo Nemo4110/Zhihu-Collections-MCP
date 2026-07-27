@@ -136,6 +136,81 @@ class SourceCandidateTests(unittest.TestCase):
         self.assertEqual({item.candidate for item in snapshots}, {"answer_api", "answer_page"})
 
 
+    def test_fetch_article_metadata_reads_updated_time_from_article_api(self):
+        requested_urls = []
+
+        def request_get(url, **kwargs):
+            requested_urls.append(url)
+            return FakeResponse(payload={"id": 9, "updated": 888})
+
+        metadata = main.fetch_article_metadata(
+            "https://zhuanlan.zhihu.com/p/9",
+            request_get=request_get,
+        )
+
+        self.assertEqual(metadata.updated_time, 888)
+        self.assertEqual(requested_urls, ["https://zhuanlan.zhihu.com/api/articles/9"])
+
+
+    def test_fetch_article_metadata_returns_unknown_time_when_api_fails(self):
+        def request_get(url, **kwargs):
+            return FakeResponse(status_code=403, payload={"error": {"message": "blocked"}})
+
+        metadata = main.fetch_article_metadata(
+            "https://zhuanlan.zhihu.com/p/9",
+            request_get=request_get,
+        )
+
+        self.assertEqual(metadata.source_type, "article")
+        self.assertEqual(metadata.source_id, "9")
+        self.assertIsNone(metadata.updated_time)
+
+    def test_fetch_article_snapshots_uses_api_without_page_after_success(self):
+        requested_urls = []
+
+        def request_get(url, **kwargs):
+            requested_urls.append(url)
+            return FakeResponse(
+                payload={
+                    "id": 9,
+                    "updated": 888,
+                    "content": "<p>Complete article API body.</p><p>Required ending.</p>",
+                }
+            )
+
+        snapshots = main.fetch_article_snapshots(
+            "https://zhuanlan.zhihu.com/p/9",
+            request_get=request_get,
+        )
+
+        self.assertEqual([item.candidate for item in snapshots], ["article_api"])
+        self.assertEqual(snapshots[0].metadata.updated_time, 888)
+        self.assertEqual(requested_urls, ["https://zhuanlan.zhihu.com/api/articles/9"])
+
+    def test_fetch_article_snapshots_falls_back_to_page_when_api_fails(self):
+        requested_urls = []
+
+        def request_get(url, **kwargs):
+            requested_urls.append(url)
+            if "/api/articles/" in url:
+                return FakeResponse(status_code=403, payload={"error": {"message": "blocked"}})
+            return FakeResponse(
+                text='<div class="Post-RichText"><p>Fallback page body.</p><p>Fallback ending.</p></div>'
+            )
+
+        snapshots = main.fetch_article_snapshots(
+            "https://zhuanlan.zhihu.com/p/9",
+            request_get=request_get,
+        )
+
+        self.assertEqual([item.candidate for item in snapshots], ["article_page"])
+        self.assertEqual(
+            requested_urls,
+            [
+                "https://zhuanlan.zhihu.com/api/articles/9",
+                "https://zhuanlan.zhihu.com/p/9",
+            ],
+        )
     def test_article_parser_does_not_select_outer_footer_container(self):
         html = (
             '<div class="Post-content">'

@@ -28,7 +28,7 @@ Export-Zhihu-Collections 是一个将知乎收藏夹导出为 Markdown 格式的
   - `get_collections_from_page()`: 从知乎页面解析收藏夹信息
   - `update_config_with_collections()`: 自动更新配置文件
 - **utils.py**: 包含用于文件名清理的 `filter_title_str()` 函数
-- **integrity.py**: 导出完整性核心模块，负责规范 URL、源内容/Markdown 哈希、文本覆盖率、图片清单、原子写入、完整性清单、刷新策略和运行报告
+- **integrity.py**: 导出完整性核心模块，负责规范 URL、源内容/Markdown 哈希、公式与图片的对称文本归一化、分段相似度覆盖率、警告分级、图片清单、原子写入、完整性清单、刷新策略和运行报告
 - **config.json**: 主配置文件，包含收藏夹列表、输出路径和系统设置
 - **config_examples.json**: 各种操作系统的配置示例
 - **zhihuUrls.json**: 旧版收藏夹URL列表文件（向后兼容）
@@ -72,7 +72,7 @@ python main.py --audit --repair
 python main.py --force
 ```
 
-每个收藏夹目录包含 `.zhihu-integrity.json`；每次运行在输出目录的 `logs/` 下生成 `integrity_*.json`。支持内容验证失败返回 1，配置/分页/清单结构失败返回 2。`pin`/想法会明确报告为不支持类型，但不会导致其他回答和专栏失败。
+每个收藏夹目录包含 `.zhihu-integrity.json`；每次运行在输出目录的 `logs/` 下生成 `integrity_*.json`。文本覆盖率 `0.90-0.98` 且无硬错误时记录为 `verified_with_warnings`，不导致非零退出码；硬性支持内容验证失败返回 1，配置/分页/清单结构失败返回 2。`pin`/想法会明确报告为不支持类型，但不会导致其他回答和专栏失败。专栏正文优先使用 `zhuanlan.zhihu.com/api/articles/{id}`，失败后回退网页解析；图片下载有三次有界重试并可复用已有非空资源。 收藏夹分页遵循 `paging.next/is_end`；已到末页但 API 报告总数大于可见项目数时记录 `total_mismatch` 和收藏夹 warning，不重复边界条目。
 
 隔离 worktree 可通过 `ZHIHU_COOKIES_FILE` 引用主检出中被忽略的 Cookie 文件，禁止将 Cookie 内容写入代码、测试、日志或 Git。
 

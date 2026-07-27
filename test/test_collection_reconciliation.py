@@ -58,6 +58,48 @@ class CollectionReconciliationTests(unittest.TestCase):
         self.assertEqual(result.raw_item_count, 45)
         self.assertEqual(len(result.exportable_items), 45)
 
+
+    def test_api_end_allows_explicit_reported_total_gap(self):
+        offsets = []
+        pages = {
+            0: {
+                "data": [answer_item(index) for index in range(19)],
+                "paging": {
+                    "is_end": False,
+                    "next": "https://www.zhihu.com/api/v4/collections/123/items?limit=20&offset=20",
+                },
+            },
+            20: {
+                "data": [answer_item(index) for index in range(19, 39)],
+                "paging": {
+                    "is_end": False,
+                    "next": "https://www.zhihu.com/api/v4/collections/123/items?limit=20&offset=40",
+                },
+            },
+            40: {
+                "data": [answer_item(index) for index in range(39, 48)],
+                "paging": {"is_end": True},
+            },
+        }
+
+        def request_get(url, **kwargs):
+            offset = int(url.split("offset=")[1].split("&")[0])
+            offsets.append(offset)
+            return FakeResponse(pages[offset])
+
+        result = main.fetch_collection_items(
+            "123",
+            request_get=request_get,
+            get_total=lambda _: 49,
+            sleep=lambda _: None,
+        )
+
+        self.assertEqual(offsets, [0, 20, 40])
+        self.assertTrue(result.complete, result)
+        self.assertTrue(result.reached_end)
+        self.assertEqual(result.raw_item_count, 48)
+        self.assertEqual(result.total_mismatch, {"expected": 49, "actual": 48})
+
     def test_pin_is_explicitly_unsupported_without_failing_collection(self):
         payload = {
             "data": [
@@ -110,6 +152,20 @@ class CollectionReconciliationTests(unittest.TestCase):
         self.assertEqual(result.raw_item_count, 3)
         self.assertEqual(len(result.exportable_items), 2)
         self.assertEqual(len(result.duplicate_urls), 1)
+
+
+    def test_empty_final_page_cannot_reconcile_nonzero_total(self):
+        payload = {"data": [], "paging": {"is_end": True}}
+        result = main.fetch_collection_items(
+            "123",
+            request_get=lambda *args, **kwargs: FakeResponse(payload),
+            get_total=lambda _: 5,
+            sleep=lambda _: None,
+        )
+
+        self.assertFalse(result.complete)
+        self.assertEqual(result.raw_item_count, 0)
+        self.assertIsNone(result.total_mismatch)
 
     def test_short_api_page_is_incomplete(self):
         result = main.fetch_collection_items(

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import main
 from integrity import (
+    CollectionFetchResult,
     CollectionItem,
     ExportMode,
     IntegrityManifestStore,
@@ -128,6 +129,74 @@ class ExportPipelineTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), original)
             self.assertNotIn(self.url, store.records)
 
+
+    def test_warning_valid_render_is_written_and_persisted(self):
+        source = "ABCDEFGHIJKLMNOPQRSTUVWXYZ" * 4
+        rendered_text = source[:-5] + "12345"
+        snapshot = snapshot_from_html(
+            self.metadata,
+            "answer_api",
+            f"<p>{source}</p>",
+        )
+        rendered = f"> {self.url}\n{rendered_text}"
+        with workspace_directory() as directory:
+            store = self.make_store(directory)
+            result = main.export_item_with_integrity(
+                self.item,
+                directory,
+                store,
+                ExportMode.BALANCED,
+                fetch_metadata_fn=lambda _: self.metadata,
+                fetch_snapshot_fn=lambda _: snapshot,
+                render_markdown_fn=lambda current_snapshot, item: rendered,
+            )
+
+            self.assertEqual(result["status"], "downloaded")
+            self.assertEqual(result["warnings"][0]["code"], "low_text_coverage")
+            self.assertEqual(store.records[self.url]["status"], "verified_with_warnings")
+            self.assertEqual(store.records[self.url]["warnings"][0]["code"], "low_text_coverage")
+            self.assertTrue((directory / "Example.md").exists())
+
+
+    def test_collection_total_mismatch_is_reported_as_warning_status(self):
+        fetch_result = CollectionFetchResult("1", 2)
+        fetch_result.add_raw_item(
+            {
+                "content": {
+                    "type": "answer",
+                    "url": self.url,
+                    "question": {"title": "Example"},
+                }
+            }
+        )
+        fetch_result.reached_end = True
+        fetch_result.reconcile()
+
+        with workspace_directory() as directory:
+            with (
+                patch.object(main, "base_output_path", directory),
+                patch.object(
+                    main,
+                    "export_item_with_integrity",
+                    return_value={
+                        "name": "Example",
+                        "url": self.url,
+                        "status": "skipped_verified",
+                        "warnings": [],
+                    },
+                ),
+            ):
+                report = main.export_collection_with_integrity(
+                    "Collection",
+                    "https://www.zhihu.com/collection/1",
+                    fetch_result=fetch_result,
+                )
+
+        self.assertEqual(report["status"], "verified_with_warnings")
+        self.assertEqual(
+            report["collection"]["total_mismatch"],
+            {"expected": 2, "actual": 1},
+        )
 
     def test_process_single_collection_routes_to_integrity_pipeline(self):
         report = {"name": "Example Collection", "status": "verified", "items": []}

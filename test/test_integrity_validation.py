@@ -220,5 +220,88 @@ class IntegrityValidationTests(unittest.TestCase):
             result = validate_markdown(snapshot, markdown, assets_dir)
         self.assertTrue(result.valid, result.issues)
 
+
+    def test_inline_equation_image_does_not_reduce_text_coverage(self):
+        image_url = "https://www.zhihu.com/equation?tex=P%28O%29"
+        snapshot = snapshot_from_html(
+            self.metadata,
+            "article_api",
+            '<p>那么应该如何预估 <img src="%s" alt="P[O](q)"> 呢？</p>' % image_url,
+        )
+        filename = image_filename_from_url(image_url)
+        markdown = (
+            f"> {self.metadata.canonical_url}\n"
+            f"那么应该如何预估 ![[{filename}]]\n(P[O](q))\n\n 呢？"
+        )
+        with workspace_directory() as assets_dir:
+            (assets_dir / filename).write_bytes(b"equation")
+            result = validate_markdown(snapshot, markdown, assets_dir)
+        self.assertTrue(result.valid, result.issues)
+        self.assertEqual(result.text_coverage, 1.0)
+
+    def test_ordinary_inline_image_splits_source_text_consistently(self):
+        image_url = "https://pic.zhimg.com/chart.jpg"
+        snapshot = snapshot_from_html(
+            self.metadata,
+            "article_api",
+            '<p>图片前的重要文字<img src="%s" alt="chart">图片后的重要文字。</p>' % image_url,
+        )
+        markdown = (
+            f"> {self.metadata.canonical_url}\n"
+            "图片前的重要文字![[chart.jpg]]\n(chart)\n\n图片后的重要文字。"
+        )
+        with workspace_directory() as assets_dir:
+            (assets_dir / "chart.jpg").write_bytes(b"image")
+            result = validate_markdown(snapshot, markdown, assets_dir)
+        self.assertTrue(result.valid, result.issues)
+        self.assertEqual(result.text_coverage, 1.0)
+
+    def test_minor_text_difference_is_valid_with_warning(self):
+        source = "ABCDEFGHIJKLMNOPQRSTUVWXYZ" * 4
+        rendered_text = source[:-5] + "12345"
+        snapshot = snapshot_from_html(
+            self.metadata,
+            "article_api",
+            f"<p>{source}</p>",
+        )
+        markdown = f"> {self.metadata.canonical_url}\n{rendered_text}"
+        with workspace_directory() as assets_dir:
+            result = validate_markdown(snapshot, markdown, assets_dir)
+        self.assertTrue(result.valid, result.issues)
+        self.assertEqual(result.status, "verified_with_warnings")
+        self.assertGreaterEqual(result.text_coverage, 0.90)
+        self.assertLess(result.text_coverage, 0.98)
+        self.assertIn("low_text_coverage", [warning.code for warning in result.warnings])
+
+
+    def test_scattered_characters_do_not_count_as_complete_text(self):
+        source = "ABCDEFGHIJ" * 10
+        scattered = "X".join(source)
+        snapshot = snapshot_from_html(
+            self.metadata,
+            "article_api",
+            f"<p>{source}</p>",
+        )
+        markdown = f"> {self.metadata.canonical_url}\n{scattered}"
+        with workspace_directory() as assets_dir:
+            result = validate_markdown(snapshot, markdown, assets_dir)
+        self.assertFalse(result.valid)
+        self.assertLess(result.text_coverage, 0.90)
+
+    def test_substantial_text_difference_remains_invalid(self):
+        source = "ABCDEFGHIJKLMNOPQRSTUVWXYZ" * 4
+        rendered_text = source[:60] + "0" * (len(source) - 60)
+        snapshot = snapshot_from_html(
+            self.metadata,
+            "article_api",
+            f"<p>{source}</p>",
+        )
+        markdown = f"> {self.metadata.canonical_url}\n{rendered_text}"
+        with workspace_directory() as assets_dir:
+            result = validate_markdown(snapshot, markdown, assets_dir)
+        self.assertFalse(result.valid)
+        self.assertLess(result.text_coverage, 0.90)
+        self.assertIn("low_text_coverage", [issue.code for issue in result.issues])
+
 if __name__ == "__main__":
     unittest.main()

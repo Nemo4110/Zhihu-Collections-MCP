@@ -55,6 +55,20 @@ class IntegrityPolicyTests(unittest.TestCase):
             IntegrityAction.SKIP_VERIFIED,
         )
 
+
+    def test_unchanged_warning_verified_file_skips(self):
+        record = {"status": "verified_with_warnings", "source_updated_time": 200}
+        self.assertEqual(
+            decide_action(
+                ExportMode.BALANCED,
+                file_exists=True,
+                record=record,
+                local_intact=True,
+                metadata=self.metadata,
+            ),
+            IntegrityAction.SKIP_VERIFIED,
+        )
+
     def test_changed_remote_timestamp_fetches_and_writes(self):
         record = {"status": "verified", "source_updated_time": 100}
         self.assertEqual(
@@ -89,6 +103,8 @@ class IntegrityPolicyTests(unittest.TestCase):
                 "markdown_sha256": sha256_file(markdown),
                 "assets": [{"filename": "image.jpg", "status": "verified"}],
             }
+            self.assertTrue(local_record_is_intact(record, markdown, assets))
+            record["status"] = "verified_with_warnings"
             self.assertTrue(local_record_is_intact(record, markdown, assets))
             markdown.write_text("changed", encoding="utf-8")
             self.assertFalse(local_record_is_intact(record, markdown, assets))

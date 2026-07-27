@@ -398,6 +398,27 @@ api_headers = {
     "sec-ch-ua-platform": "\"Windows\"",
 }
 
+def _download_image_content(src, request_get=None, sleep=None, attempts=3):
+    request_get = request_get or requests.get
+    sleep = sleep or time.sleep
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            response = request_get(
+                url=src,
+                headers=headers,
+                cookies=cookies,
+                timeout=30,
+            )
+            response.raise_for_status()
+            return response.content
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                sleep(attempt + 1)
+    raise last_error
+
+
 class ObsidianStyleConverter(MarkdownConverter):
     """
     Create a custom MarkdownConverter that adds two newlines after an image
@@ -439,14 +460,16 @@ class ObsidianStyleConverter(MarkdownConverter):
             if not os.path.exists(assetsDir):
                 os.makedirs(assetsDir)
 
-            img_response = requests.get(url=src, headers=headers, cookies=cookies, timeout=30)
-            img_response.raise_for_status()
-            img_content = img_response.content
             img_content_name = image_filename_from_url(src)
-
-            imgPath = os.path.join(assetsDir,img_content_name)
-            with open(imgPath, 'wb') as fp:
-                fp.write(img_content)
+            imgPath = os.path.join(assetsDir, img_content_name)
+            try:
+                img_content = _download_image_content(src)
+                with open(imgPath, 'wb') as fp:
+                    fp.write(img_content)
+            except requests.RequestException:
+                if not os.path.exists(imgPath) or os.path.getsize(imgPath) <= 0:
+                    raise
+                logging.warning(f"图片下载失败，复用已有资源: {src}")
 
             result = '![[%s]]\n(%s)\n\n' % (img_content_name, alt)
             logging.debug(f"convert_img returning: {result}")
@@ -615,7 +638,13 @@ def fetch_collection_items(
         return result
 
     limit = 20
-    for offset in range(0, result.expected_total, limit):
+    offset = 0
+    visited_offsets = set()
+    while offset < result.expected_total:
+        if offset in visited_offsets:
+            result.page_failures.append({"offset": offset, "error": "paging_offset_loop"})
+            break
+        visited_offsets.add(offset)
         collection_url = (
             f"https://www.zhihu.com/api/v4/collections/{collection_id}/items"
             f"?offset={offset}&limit={limit}"
@@ -645,12 +674,40 @@ def fetch_collection_items(
         if payload is None:
             result.page_failures.append({"offset": offset, "error": str(last_error)})
             break
-        logging.info(f"成功获取 {len(payload['data'])} 个原始项目")
-        for raw_item in payload['data']:
+
+        page_items = payload['data']
+        logging.info(f"成功获取 {len(page_items)} 个原始项目")
+        for raw_item in page_items:
             result.add_raw_item(raw_item)
+
+        paging = payload.get("paging")
+        if isinstance(paging, dict):
+            if paging.get("is_end") is True:
+                result.reached_end = True
+                break
+            next_url = str(paging.get("next") or "")
+            next_match = re.search(r"[?&]offset=(\d+)", next_url)
+            if next_match:
+                next_offset = int(next_match.group(1))
+                if next_offset <= offset:
+                    result.page_failures.append(
+                        {"offset": offset, "error": f"invalid_next_offset:{next_offset}"}
+                    )
+                    break
+                offset = next_offset
+                continue
+
+        if len(page_items) < limit:
+            break
+        offset += limit
 
     result.reconcile()
     if result.complete:
+        if result.total_mismatch:
+            logging.warning(
+                f"收藏夹 {collection_id} 已到API末页，但报告总数与可见项目不一致: "
+                f"expected={result.expected_total}, raw={result.raw_item_count}"
+            )
         logging.info(
             f"收藏夹 {collection_id} 完整获取: raw={result.raw_item_count}, "
             f"exportable={len(result.exportable_items)}, "
@@ -826,11 +883,73 @@ def fetch_answer_snapshots(answer_url, request_get=None):
     return candidates
 
 
+def _article_api_url(article_id):
+    return f"https://zhuanlan.zhihu.com/api/articles/{article_id}"
+
+
+def _article_metadata_from_payload(canonical_url, source_type, article_id, payload):
+    updated_time = payload.get("updated_time")
+    if updated_time is None:
+        updated_time = payload.get("updated")
+    return SourceMetadata(
+        canonical_url=canonical_url,
+        source_type=source_type,
+        source_id=article_id,
+        updated_time=updated_time,
+    )
+
+
+def fetch_article_metadata(article_url, request_get=None):
+    request_get = request_get or requests.get
+    canonical_url = canonicalize_url(article_url)
+    source_type, article_id = parse_source_identity(canonical_url)
+    try:
+        response = request_get(
+            _article_api_url(article_id),
+            headers=api_headers,
+            cookies=cookies,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return _article_metadata_from_payload(
+            canonical_url,
+            source_type,
+            article_id,
+            response.json(),
+        )
+    except Exception as exc:
+        logging.warning(f"专栏元数据API获取失败，继续抓取正文: {canonical_url}: {exc}")
+        return SourceMetadata(canonical_url, source_type, article_id, None)
+
+
 def fetch_article_snapshots(article_url, request_get=None):
     request_get = request_get or requests.get
     canonical_url = canonicalize_url(article_url)
     source_type, article_id = parse_source_identity(canonical_url)
     metadata = SourceMetadata(canonical_url, source_type, article_id, None)
+
+    try:
+        api_response = request_get(
+            _article_api_url(article_id),
+            headers=api_headers,
+            cookies=cookies,
+            timeout=30,
+        )
+        api_response.raise_for_status()
+        payload = api_response.json()
+        content = payload.get("content")
+        if isinstance(content, str) and content.strip():
+            api_metadata = _article_metadata_from_payload(
+                canonical_url,
+                source_type,
+                article_id,
+                payload,
+            )
+            return [snapshot_from_html(api_metadata, "article_api", content)]
+        logging.warning(f"专栏API未返回正文，尝试网页候选: {canonical_url}")
+    except Exception as exc:
+        logging.warning(f"专栏API候选获取失败，尝试网页候选: {canonical_url}: {exc}")
+
     response = request_get(
         canonical_url,
         headers=headers,
@@ -1258,6 +1377,8 @@ def flush_logs():
 def _default_fetch_metadata(item):
     if item.source_type == "answer":
         return fetch_answer_metadata(item.url)
+    if item.source_type == "article":
+        return fetch_article_metadata(item.url)
     return SourceMetadata(item.url, item.source_type, item.source_id, None)
 
 
@@ -1316,6 +1437,7 @@ def export_item_with_integrity(
             "action": action.value,
             "markdown_path": file_path.name,
             "issues": [],
+            "warnings": record.get("warnings", []) if record else [],
         }
 
     try:
@@ -1357,6 +1479,7 @@ def export_item_with_integrity(
                 "markdown_path": file_path.name,
                 "text_coverage": existing_result.text_coverage,
                 "issues": [],
+                "warnings": [warning.__dict__ for warning in existing_result.warnings],
             }
         if mode == ExportMode.AUDIT:
             issues = existing_result.issues if existing_result else []
@@ -1367,6 +1490,9 @@ def export_item_with_integrity(
                 "action": action.value,
                 "markdown_path": file_path.name,
                 "issues": [issue.__dict__ for issue in issues],
+                "warnings": [
+                    warning.__dict__ for warning in (existing_result.warnings if existing_result else [])
+                ],
             }
 
     try:
@@ -1387,6 +1513,7 @@ def export_item_with_integrity(
             "status": "render_invalid",
             "action": action.value,
             "issues": [issue.__dict__ for issue in rendered_result.issues],
+            "warnings": [warning.__dict__ for warning in rendered_result.warnings],
         }
 
     atomic_write_text(file_path, rendered)
@@ -1399,6 +1526,7 @@ def export_item_with_integrity(
             "status": "final_invalid",
             "action": action.value,
             "issues": [issue.__dict__ for issue in final_result.issues],
+            "warnings": [warning.__dict__ for warning in final_result.warnings],
         }
     manifest.records[item.url] = record_from_validation(
         snapshot,
@@ -1421,6 +1549,7 @@ def export_item_with_integrity(
         "markdown_path": file_path.name,
         "text_coverage": final_result.text_coverage,
         "issues": [],
+        "warnings": [warning.__dict__ for warning in final_result.warnings],
     }
 
 
@@ -1467,7 +1596,15 @@ def export_collection_with_integrity(
             "final_invalid", "invalid"
         }
     ]
-    collection_report["status"] = "verified" if not failures else "invalid"
+    has_warnings = bool(result.total_mismatch) or any(
+        item.get("warnings") for item in collection_report["items"]
+    )
+    if failures:
+        collection_report["status"] = "invalid"
+    elif has_warnings:
+        collection_report["status"] = "verified_with_warnings"
+    else:
+        collection_report["status"] = "verified"
     return collection_report
 
 def process_single_collection(collection_name, collection_url):
