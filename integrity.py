@@ -15,7 +15,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from bs4 import BeautifulSoup, NavigableString
 
@@ -209,7 +209,23 @@ def extract_text_segments(html: str) -> tuple[str, ...]:
             values.extend(_fragment_text(value, max_length=160))
     return _combine_short_segments(values)
 
+def is_equation_url(url: str) -> bool:
+    parts = urlsplit((url or "").strip())
+    return (
+        parts.path.rstrip("/") == "/equation"
+        and parts.hostname in {"www.zhihu.com", "zhihu.com"}
+    )
+
+
+def equation_tex_from_url(url: str) -> str:
+    if not is_equation_url(url):
+        return ""
+    return (parse_qs(urlsplit(url).query, keep_blank_values=True).get("tex") or [""])[0]
+
+
 def image_filename_from_url(url: str) -> str:
+    if is_equation_url(url):
+        return f"equation-{sha256_text(url)[:16]}.svg"
     name = Path(unquote(urlsplit(url).path)).name
     if name:
         return name
@@ -230,7 +246,7 @@ def extract_image_urls(html: str) -> tuple[str, ...]:
     urls: list[str] = []
     for image in soup.find_all("img"):
         src = image_source_url(image)
-        if not src:
+        if not src or is_equation_url(src):
             continue
         if src not in seen:
             seen.add(src)

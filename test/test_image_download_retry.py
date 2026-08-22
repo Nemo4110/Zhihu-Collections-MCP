@@ -57,7 +57,7 @@ class ImageDownloadRetryTests(unittest.TestCase):
             self.assertEqual(request_get.call_count, 2)
             sleep.assert_called_once_with(1)
             self.assertEqual(asset.read_bytes(), b"image-bytes")
-            self.assertIn("![[image.jpg]]", rendered)
+            self.assertEqual(rendered, "![chart](assets/image.jpg)")
 
     def test_existing_non_empty_asset_is_reused_after_retry_exhaustion(self):
         with workspace_directory() as directory:
@@ -80,7 +80,7 @@ class ImageDownloadRetryTests(unittest.TestCase):
             self.assertEqual(request_get.call_count, 3)
             self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
             self.assertEqual(asset.read_bytes(), b"existing-image")
-            self.assertIn("![[image.jpg]]", rendered)
+            self.assertEqual(rendered, "![chart](assets/image.jpg)")
 
 
 if __name__ == "__main__":
