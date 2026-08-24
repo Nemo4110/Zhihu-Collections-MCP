@@ -94,7 +94,7 @@ class IntegrityValidationTests(unittest.TestCase):
         )
         markdown = (
             "> https://www.zhihu.com/question/1/answer/2\n"
-            "Text body long enough for validation.\n\n![[a.jpg]]\n"
+            "Text body long enough for validation.\n\n![](assets/a.jpg)\n"
         )
         with workspace_directory() as assets_dir:
             missing = validate_markdown(snapshot, markdown, assets_dir)
@@ -109,6 +109,13 @@ class IntegrityValidationTests(unittest.TestCase):
             image_filename_from_url("https://pic.zhimg.com/path/image.jpg?source=abc"),
             "image.jpg",
         )
+
+    def test_equation_filename_is_unique_and_has_svg_extension(self):
+        first = image_filename_from_url("https://www.zhihu.com/equation?tex=x")
+        second = image_filename_from_url("https://www.zhihu.com/equation?tex=y")
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.startswith("equation-"))
+        self.assertTrue(first.endswith(".svg"))
 
 
     def test_rendered_src_is_preferred_over_data_original_for_asset_compatibility(self):
@@ -213,7 +220,7 @@ class IntegrityValidationTests(unittest.TestCase):
         )
         markdown = (
             "> https://www.zhihu.com/question/1/answer/2\n"
-            "## 3 实验\n\n![[chart.jpg]]\n\n线上效果非常明显。"
+            "## 3 实验\n\n![](assets/chart.jpg)\n\n线上效果非常明显。"
         )
         with workspace_directory() as assets_dir:
             (assets_dir / "chart.jpg").write_bytes(b"image")
@@ -228,14 +235,13 @@ class IntegrityValidationTests(unittest.TestCase):
             "article_api",
             '<p>那么应该如何预估 <img src="%s" alt="P[O](q)"> 呢？</p>' % image_url,
         )
-        filename = image_filename_from_url(image_url)
         markdown = (
             f"> {self.metadata.canonical_url}\n"
-            f"那么应该如何预估 ![[{filename}]]\n(P[O](q))\n\n 呢？"
+            "那么应该如何预估 $P[O](q)$ 呢？"
         )
         with workspace_directory() as assets_dir:
-            (assets_dir / filename).write_bytes(b"equation")
             result = validate_markdown(snapshot, markdown, assets_dir)
+        self.assertEqual(snapshot.image_urls, ())
         self.assertTrue(result.valid, result.issues)
         self.assertEqual(result.text_coverage, 1.0)
 
@@ -248,7 +254,7 @@ class IntegrityValidationTests(unittest.TestCase):
         )
         markdown = (
             f"> {self.metadata.canonical_url}\n"
-            "图片前的重要文字![[chart.jpg]]\n(chart)\n\n图片后的重要文字。"
+            "图片前的重要文字![chart](assets/chart.jpg)图片后的重要文字。"
         )
         with workspace_directory() as assets_dir:
             (assets_dir / "chart.jpg").write_bytes(b"image")

@@ -16,6 +16,7 @@ import logging
 import traceback
 import platform
 import pathlib
+from urllib.parse import quote
 
 from markdownify import MarkdownConverter
 
@@ -34,8 +35,10 @@ from integrity import (
     canonicalize_url,
     choose_best_snapshot,
     decide_action,
+    equation_tex_from_url,
     image_filename_from_url,
     image_source_url,
+    is_equation_url,
     local_record_is_intact,
     parse_source_identity,
     record_from_validation,
@@ -451,6 +454,21 @@ class ObsidianStyleConverter(MarkdownConverter):
             if not src:
                 return ''
 
+            if is_equation_url(src):
+                tex = alt or equation_tex_from_url(src)
+                if not tex:
+                    return ''
+                parent = getattr(el, 'parent', None)
+                is_block = len(tex) > 70 or bool(
+                    parent
+                    and getattr(parent, 'name', None) in {'p', 'div', 'figure'}
+                    and not parent.get_text('', strip=True)
+                    and len(parent.find_all('img')) == 1
+                )
+                result = f"\n\n$$\n{tex}\n$$\n\n" if is_block else f"${tex}$"
+                logging.debug(f"convert_img returning equation: {result}")
+                return result
+
             # 使用全局变量获取当前收藏夹名称
             global current_collection_name
             downloadDir = get_output_path(current_collection_name)
@@ -471,7 +489,9 @@ class ObsidianStyleConverter(MarkdownConverter):
                     raise
                 logging.warning(f"图片下载失败，复用已有资源: {src}")
 
-            result = '![[%s]]\n(%s)\n\n' % (img_content_name, alt)
+            escaped_alt = alt.replace('\n', ' ').replace(']', r'\]')
+            asset_path = quote(f"assets/{img_content_name}", safe="/-._~")
+            result = f"![{escaped_alt}]({asset_path})"
             logging.debug(f"convert_img returning: {result}")
             return result
         except Exception as e:

@@ -163,7 +163,7 @@ python main.py
 - **自动收藏夹获取**: 通过 `fetch_collections.py` 自动获取用户收藏夹列表
 
 ### 内容处理
-- 图片使用 Obsidian 风格的 `![[filename]]` 语法下载和引用
+- 图片使用标准 Markdown 的 `![alt](assets/filename)` 语法下载和引用，知乎公式转换为 LaTeX 数学语法
 - 链接卡片转换为带有卡片标题的纯文本
 - 引用和脚注经过处理以符合正确的 Markdown 格式
 - 文件名经过清理以兼容文件系统
