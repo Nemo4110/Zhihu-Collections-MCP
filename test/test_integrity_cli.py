@@ -31,6 +31,14 @@ class IntegrityCliTests(unittest.TestCase):
         )
         self.assertEqual(main.parse_args(["--force"]).mode, ExportMode.FORCE)
 
+    def test_parse_no_page_candidates_flag(self):
+        self.assertFalse(main.parse_args([]).no_page_candidates)
+        self.assertTrue(main.parse_args(["--no-page-candidates"]).no_page_candidates)
+        self.assertEqual(
+            main.parse_args(["--no-page-candidates"]).mode,
+            ExportMode.BALANCED,
+        )
+
     def test_invalid_mode_combinations_exit_two(self):
         with self.assertRaises(SystemExit) as repair_only:
             main.parse_args(["--repair"])

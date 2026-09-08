@@ -28,6 +28,8 @@ class FakeResponse:
 
 class SourceCandidateTests(unittest.TestCase):
     def setUp(self):
+        main._reset_page_candidate_state()
+        self.addCleanup(main._reset_page_candidate_state)
         self.answer_metadata = SourceMetadata(
             "https://www.zhihu.com/question/1/answer/2",
             "answer",
@@ -134,6 +136,62 @@ class SourceCandidateTests(unittest.TestCase):
             request_get=request_get,
         )
         self.assertEqual({item.candidate for item in snapshots}, {"answer_api", "answer_page"})
+
+    def test_fetch_answer_snapshots_skips_page_candidates_when_disabled(self):
+        requested_urls = []
+
+        def request_get(url, **kwargs):
+            requested_urls.append(url)
+            if "/api/v4/answers/" in url:
+                return FakeResponse(payload={"content": "<p>API-only candidate content.</p>"})
+            return FakeResponse(text='<div class="RichContent-inner"><p>Page.</p></div>')
+
+        main._reset_page_candidate_state(enabled=False)
+        snapshots = main.fetch_answer_snapshots(
+            "https://www.zhihu.com/question/1/answer/2",
+            request_get=request_get,
+        )
+
+        self.assertEqual([item.candidate for item in snapshots], ["answer_api"])
+        self.assertNotIn("https://www.zhihu.com/question/1/answer/2", requested_urls)
+
+    def test_page_candidate_failures_trip_circuit_breaker(self):
+        main._reset_page_candidate_state(failure_limit=3)
+        page_urls_requested = []
+
+        def request_get(url, **kwargs):
+            if "/api/v4/answers/" in url:
+                return FakeResponse(payload={"content": "<p>API candidate survives.</p>"})
+            page_urls_requested.append(url)
+            return FakeResponse(status_code=403, text="Forbidden")
+
+        url = "https://www.zhihu.com/question/1/answer/2"
+        for _ in range(3):
+            main.fetch_answer_snapshots(url, request_get=request_get)
+
+        self.assertEqual(len(page_urls_requested), 3)
+        snapshots = main.fetch_answer_snapshots(url, request_get=request_get)
+        self.assertEqual(len(page_urls_requested), 3)
+        self.assertEqual([item.candidate for item in snapshots], ["answer_api"])
+
+    def test_page_candidate_failure_counter_resets_on_success(self):
+        main._reset_page_candidate_state(failure_limit=5)
+        page_urls_requested = []
+
+        def request_get(url, **kwargs):
+            if "/api/v4/answers/" in url:
+                return FakeResponse(payload={"content": "<p>API candidate survives.</p>"})
+            page_urls_requested.append(url)
+            if len(page_urls_requested) % 2 == 0:
+                return FakeResponse(text='<div class="RichContent-inner"><p>Page.</p></div>')
+            return FakeResponse(status_code=403, text="Forbidden")
+
+        url = "https://www.zhihu.com/question/1/answer/2"
+        for _ in range(6):
+            main.fetch_answer_snapshots(url, request_get=request_get)
+
+        self.assertEqual(len(page_urls_requested), 6)
+        self.assertLess(main._page_candidate_failures, main.PAGE_CANDIDATE_FAILURE_LIMIT)
 
 
     def test_fetch_article_metadata_reads_updated_time_from_article_api(self):

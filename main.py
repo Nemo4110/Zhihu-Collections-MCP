@@ -864,6 +864,40 @@ def fetch_answer_metadata(answer_url, request_get=None):
     )
 
 
+# 知乎网页候选抓取受反爬限流影响，失败率会随请求量累积（典型的 403 限流）。
+# 连续失败达到上限后熔断：本次运行剩余项目跳过网页候选抓取，仅依赖 API 候选校验。
+PAGE_CANDIDATES_ENABLED = True
+PAGE_CANDIDATE_FAILURE_LIMIT = 5
+_page_candidate_failures = 0
+
+
+def _reset_page_candidate_state(enabled=True, failure_limit=5):
+    """重置网页候选抓取状态（测试及 MCP 入口可复用）。"""
+    global PAGE_CANDIDATES_ENABLED, PAGE_CANDIDATE_FAILURE_LIMIT, _page_candidate_failures
+    PAGE_CANDIDATES_ENABLED = enabled
+    PAGE_CANDIDATE_FAILURE_LIMIT = failure_limit
+    _page_candidate_failures = 0
+
+
+def _page_candidates_available():
+    return PAGE_CANDIDATES_ENABLED and _page_candidate_failures < PAGE_CANDIDATE_FAILURE_LIMIT
+
+
+def _record_page_candidate_success():
+    global _page_candidate_failures
+    _page_candidate_failures = 0
+
+
+def _record_page_candidate_failure():
+    global _page_candidate_failures
+    _page_candidate_failures += 1
+    if _page_candidate_failures == PAGE_CANDIDATE_FAILURE_LIMIT:
+        logging.warning(
+            f"网页候选连续失败 {PAGE_CANDIDATE_FAILURE_LIMIT} 次（疑似限流累积），"
+            "本次运行剩余项目将跳过网页候选抓取"
+        )
+
+
 def fetch_answer_snapshots(answer_url, request_get=None):
     request_get = request_get or requests.get
     canonical_url = canonicalize_url(answer_url)
@@ -892,17 +926,20 @@ def fetch_answer_snapshots(answer_url, request_get=None):
             )
     except Exception as exc:
         logging.warning(f"回答API候选获取失败: {canonical_url}: {exc}")
-    try:
-        page_response = request_get(
-            canonical_url,
-            headers=headers,
-            cookies=cookies,
-            timeout=30,
-        )
-        page_response.raise_for_status()
-        candidates.extend(parse_answer_page_candidates(metadata, page_response.text))
-    except Exception as exc:
-        logging.warning(f"回答网页候选获取失败: {canonical_url}: {exc}")
+    if _page_candidates_available():
+        try:
+            page_response = request_get(
+                canonical_url,
+                headers=headers,
+                cookies=cookies,
+                timeout=30,
+            )
+            page_response.raise_for_status()
+            candidates.extend(parse_answer_page_candidates(metadata, page_response.text))
+            _record_page_candidate_success()
+        except Exception as exc:
+            logging.warning(f"回答网页候选获取失败: {canonical_url}: {exc}")
+            _record_page_candidate_failure()
     return candidates
 
 
@@ -1650,6 +1687,11 @@ def parse_args(argv=None):
     parser.add_argument("--audit", action="store_true", help="严格获取并审计所有支持内容，不修改文件")
     parser.add_argument("--repair", action="store_true", help="与--audit配合，修复审计发现的问题")
     parser.add_argument("--force", action="store_true", help="强制重新下载并校验所有支持内容")
+    parser.add_argument(
+        "--no-page-candidates",
+        action="store_true",
+        help="跳过回答网页候选抓取，仅使用API候选校验（网页请求易被限流403）",
+    )
     args = parser.parse_args(argv)
     if args.repair and not args.audit:
         parser.error("--repair 必须与 --audit 一起使用")
@@ -1702,8 +1744,10 @@ def save_integrity_report(collection_reports, mode, logs_dir=None, timestamp=Non
 
 
 def main(argv=None):
-    global config, base_output_path, current_collection_name, processing_log
+    global config, base_output_path, current_collection_name, processing_log, PAGE_CANDIDATES_ENABLED
     args = parse_args(argv)
+    if args.no_page_candidates:
+        PAGE_CANDIDATES_ENABLED = False
     config = load_config()
 
     if config.get('outputPath'):
@@ -1727,6 +1771,8 @@ def main(argv=None):
         return 2
 
     print(f"运行模式: {args.mode.value}")
+    if args.no_page_candidates:
+        logging.info("已启用 --no-page-candidates，本次运行跳过回答网页候选抓取")
     print(f"共找到 {len(zhihu_collections)} 个收藏夹待处理")
     collection_reports = []
     for collection in zhihu_collections:

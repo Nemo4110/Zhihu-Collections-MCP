@@ -70,9 +70,12 @@ python main.py --audit --repair
 
 # 强制刷新全部支持内容
 python main.py --force
+
+# 跳过回答网页候选抓取，仅用 API 候选校验（网页请求易被知乎限流 403）
+python main.py --no-page-candidates
 ```
 
-进度与日志统一通过 `logging` 输出（不使用 tqdm），格式为 `时间 - 级别 - [文件名:行号] - 消息`，每项内容一行进度（`校验 <收藏夹> [i/N]: 标题`）。
+回答校验会同时抓取 API 候选和网页候选；网页候选连续失败 5 次（`PAGE_CANDIDATE_FAILURE_LIMIT`，疑似限流累积）后自动熔断，本次运行剩余项目仅用 API 候选校验。进度与日志统一通过 `logging` 输出（不使用 tqdm），格式为 `时间 - 级别 - [文件名:行号] - 消息`，每项内容一行进度（`校验 <收藏夹> [i/N]: 标题`）。
 
 每个收藏夹目录包含 `.zhihu-integrity.json`；每次运行在输出目录的 `logs/` 下生成 `integrity_*.json`。文本覆盖率 `0.90-0.98` 且无硬错误时记录为 `verified_with_warnings`，不导致非零退出码；硬性支持内容验证失败返回 1，配置/分页/清单结构失败返回 2。`pin`/想法会明确报告为不支持类型，但不会导致其他回答和专栏失败。专栏正文优先使用 `zhuanlan.zhihu.com/api/articles/{id}`，失败后回退网页解析；图片下载有三次有界重试并可复用已有非空资源。 收藏夹分页遵循 `paging.next/is_end`；已到末页但 API 报告总数大于可见项目数时记录 `total_mismatch` 和收藏夹 warning，不重复边界条目。
 
