@@ -19,7 +19,6 @@ pyxdg
 requests
 six
 soupsieve
-tqdm
 typing_extensions
 urllib3
 mcp

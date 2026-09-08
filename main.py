@@ -7,7 +7,6 @@ import time
 import requests
 from bs4 import BeautifulSoup
 import re
-from tqdm import tqdm
 from datetime import datetime
 from dataclasses import replace
 from utils import filter_title_str
@@ -177,7 +176,9 @@ def setup_debug_logging():
     console_handler.setLevel(logging.INFO)
     
     # 设置格式
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+    )
     file_handler.setFormatter(formatter)
     console_handler.setFormatter(formatter)
     
@@ -219,7 +220,9 @@ def reconfigure_logging():
     console_handler.setLevel(logging.INFO)
     
     # 设置格式
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+    )
     file_handler.setFormatter(formatter)
     console_handler.setFormatter(formatter)
     
@@ -1599,7 +1602,9 @@ def export_collection_with_integrity(
         expected_collection_id=collection_id,
         collection_url=collection_url,
     )
-    for item in tqdm(result.exportable_items, desc=f"校验 {collection_name}"):
+    total_items = len(result.exportable_items)
+    for index, item in enumerate(result.exportable_items, start=1):
+        logging.info(f"校验 {collection_name} [{index}/{total_items}]: {item.title}")
         item_report = export_item_with_integrity(
             item,
             collection_dir,
