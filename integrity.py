@@ -276,7 +276,9 @@ def markdown_visible_text(markdown: str) -> str:
         value,
     )
     value = re.sub(r"!\[.*?\]\([^\r\n]*\)", " ", value)
-    value = re.sub(r"\[([^\]]+)\]\([^)]*\)", r" \1 ", value)
+    # 仅剥离 href 无空格的链接（真实 URL）：知乎引用文本形如「[6] (说明文字)」，
+    # 渲染进 Markdown 后恰构成链接语法，若一并剥离会与源文本不对称、误判末段缺失。
+    value = re.sub(r"\[([^\]]+)\]\(([^\s)]*)\)", r" \1 ", value)
     value = re.sub(r"`{1,3}([^`]*)`{1,3}", r" \1 ", value, flags=re.DOTALL)
     value = re.sub(r"(?m)^\s{0,3}(?:#{1,6}\s+|>\s?|[-+*]\s+|\d+[.)]\s+)", "", value)
     value = value.translate(str.maketrans({char: " " for char in "*_~[]"}))
