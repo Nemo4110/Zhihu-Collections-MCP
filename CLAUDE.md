@@ -82,6 +82,8 @@ python main.py --page-candidates
 
 每个收藏夹目录包含 `.zhihu-integrity.json`；每次运行在输出目录的 `logs/` 下生成 `integrity_*.json`。文本覆盖率 `0.90-0.98` 且无硬错误时记录为 `verified_with_warnings`，不导致非零退出码；硬性支持内容验证失败返回 1，配置/分页/清单结构失败返回 2。`pin`/想法会明确报告为不支持类型，但不会导致其他回答和专栏失败。专栏正文优先使用 `zhuanlan.zhihu.com/api/articles/{id}`，失败后回退网页解析；图片下载有三次有界重试并可复用已有非空资源。 收藏夹分页遵循 `paging.next/is_end`，项目总数直接取自第一页响应的 `paging.totals`（缺失时回退独立总数请求）；已到末页但 API 报告总数大于可见项目数时记录 `total_mismatch` 和收藏夹 warning，不重复边界条目。
 
+导出为项级并发（`ITEM_EXPORT_WORKERS`，默认 3），清单读写通过 `_manifest_lock` 互斥并在每项完成后落盘；图片在渲染前按 URL 并发预取（`IMAGE_PREFETCH_WORKERS`，默认 4，公式 URL 转公式不下载），本地已有同名非空资源（zhimg URL 含内容 hash）时直接复用不再请求。
+
 隔离 worktree 可通过 `ZHIHU_COOKIES_FILE` 引用主检出中被忽略的 Cookie 文件，禁止将 Cookie 内容写入代码、测试、日志或 Git。
 
 ### 配置和运行

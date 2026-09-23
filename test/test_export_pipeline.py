@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import shutil
+import time
 import unittest
 from unittest.mock import patch
 import uuid
@@ -242,6 +243,46 @@ class ExportPipelineTests(unittest.TestCase):
             report["collection"]["total_mismatch"],
             {"expected": 2, "actual": 1},
         )
+
+    def test_concurrent_export_processes_items_in_parallel(self):
+        fetch_result = CollectionFetchResult("1", 3)
+        for index in range(3):
+            fetch_result.add_raw_item(
+                {"content": {
+                    "type": "answer",
+                    "url": f"https://www.zhihu.com/question/1/answer/{index + 10}",
+                    "question": {"title": f"Concurrent {index}"},
+                    "updated_time": 1700000000 + index,
+                }}
+            )
+        fetch_result.reached_end = True
+        fetch_result.reconcile()
+        self.assertTrue(fetch_result.complete)
+
+        def slow_export(item, *args, **kwargs):
+            time.sleep(0.3)
+            return {
+                "name": item.title,
+                "url": item.url,
+                "status": "downloaded",
+                "warnings": [],
+            }
+
+        started = time.monotonic()
+        with (
+            patch.object(main, "base_output_path", Path.cwd() / ".test-tmp"),
+            patch.object(main, "export_item_with_integrity", side_effect=slow_export),
+        ):
+            report = main.export_collection_with_integrity(
+                "Concurrent",
+                "https://www.zhihu.com/collection/1",
+                fetch_result=fetch_result,
+            )
+        elapsed = time.monotonic() - started
+
+        # 3 项各耗时 0.3s：串行需 >=0.9s，并发（3 workers）应接近 0.3s
+        self.assertEqual(len(report["items"]), 3)
+        self.assertLess(elapsed, 0.8)
 
     def test_process_single_collection_routes_to_integrity_pipeline(self):
         report = {"name": "Example Collection", "status": "verified", "items": []}

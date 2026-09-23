@@ -4,9 +4,11 @@ import os
 import random
 import sys
 import time
+import threading
 import requests
 from bs4 import BeautifulSoup
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from dataclasses import replace
 from utils import filter_title_str
@@ -425,6 +427,49 @@ def _download_image_content(src, request_get=None, sleep=None, attempts=3):
     raise last_error
 
 
+# 图片预取并发数：zhimg CDN 限流宽松，但与项级并发（3）叠加时控制峰值请求数
+IMAGE_PREFETCH_WORKERS = 4
+
+
+def _asset_file_ready(path):
+    return os.path.exists(path) and os.path.getsize(path) > 0
+
+
+def prefetch_images(image_urls, assets_dir, request_get=None, max_workers=IMAGE_PREFETCH_WORKERS):
+    """渲染前并发预取图片到 assets 目录。
+
+    本地已有同名非空文件时跳过（zhimg 图片 URL 含内容 hash，内容更新会换 URL），
+    失败只记录日志，留给渲染阶段的单图重试兜底。
+    """
+    targets = []
+    seen = set()
+    for url in image_urls or []:
+        if not url or url in seen or is_equation_url(url):
+            continue
+        seen.add(url)
+        target_path = os.path.join(assets_dir, image_filename_from_url(url))
+        if _asset_file_ready(target_path):
+            continue
+        targets.append((url, target_path))
+    if not targets:
+        return
+
+    os.makedirs(assets_dir, exist_ok=True)
+
+    def _fetch(pair):
+        url, target_path = pair
+        try:
+            content = _download_image_content(url, request_get=request_get)
+            with open(target_path, 'wb') as fp:
+                fp.write(content)
+        except requests.RequestException as exc:
+            logging.warning(f"图片预取失败，渲染时重试: {url}: {exc}")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        list(pool.map(_fetch, targets))
+    logging.debug(f"图片预取完成: {len(seen)} 个URL，其中 {len(targets)} 张新下载")
+
+
 class ObsidianStyleConverter(MarkdownConverter):
     """
     Create a custom MarkdownConverter that adds two newlines after an image
@@ -483,14 +528,16 @@ class ObsidianStyleConverter(MarkdownConverter):
 
             img_content_name = image_filename_from_url(src)
             imgPath = os.path.join(assetsDir, img_content_name)
-            try:
-                img_content = _download_image_content(src)
-                with open(imgPath, 'wb') as fp:
-                    fp.write(img_content)
-            except requests.RequestException:
-                if not os.path.exists(imgPath) or os.path.getsize(imgPath) <= 0:
-                    raise
-                logging.warning(f"图片下载失败，复用已有资源: {src}")
+            # 预取阶段已下载或历史渲染留下的非空文件直接复用（图片 URL 含内容 hash）
+            if not _asset_file_ready(imgPath):
+                try:
+                    img_content = _download_image_content(src)
+                    with open(imgPath, 'wb') as fp:
+                        fp.write(img_content)
+                except requests.RequestException:
+                    if not _asset_file_ready(imgPath):
+                        raise
+                    logging.warning(f"图片下载失败，复用已有资源: {src}")
 
             escaped_alt = alt.replace('\n', ' ').replace(']', r'\]')
             asset_path = quote(f"assets/{img_content_name}", safe="/-._~")
@@ -1471,6 +1518,12 @@ def _default_render_markdown(snapshot, item):
     return f"> {item.url}\n{body}"
 
 
+# 清单写入/保存互斥锁：项级并发导出时保护 manifest.records 与 save() 序列化
+_manifest_lock = threading.Lock()
+# 项级并发数：控制正文 API 与渲染的并发峰值，避免触发知乎限流
+ITEM_EXPORT_WORKERS = 3
+
+
 def export_item_with_integrity(
     item,
     collection_dir,
@@ -1553,13 +1606,14 @@ def export_item_with_integrity(
 
     if action in {IntegrityAction.FETCH_AND_VERIFY, IntegrityAction.FETCH_AND_AUDIT}:
         if existing_result and existing_result.valid:
-            manifest.records[item.url] = record_from_validation(
-                snapshot,
-                file_path,
-                existing_markdown,
-                existing_result,
-                item.title,
-            )
+            with _manifest_lock:
+                manifest.records[item.url] = record_from_validation(
+                    snapshot,
+                    file_path,
+                    existing_markdown,
+                    existing_result,
+                    item.title,
+                )
             status = "audit_verified" if mode in {ExportMode.AUDIT, ExportMode.AUDIT_REPAIR} else "adopted"
             return {
                 "name": item.title,
@@ -1586,6 +1640,9 @@ def export_item_with_integrity(
             }
 
     try:
+        # 渲染前并发预取图片：convert_img 命中本地非空文件即不再发请求，
+        # 将图片下载从逐张串行改为小线程池并发（图片下载是长文章的主要耗时）。
+        prefetch_images(snapshot.image_urls, assets_dir)
         rendered = render_markdown_fn(snapshot, item)
         rendered_result = validate_markdown(snapshot, rendered, assets_dir)
     except Exception as exc:
@@ -1618,13 +1675,14 @@ def export_item_with_integrity(
             "issues": [issue.__dict__ for issue in final_result.issues],
             "warnings": [warning.__dict__ for warning in final_result.warnings],
         }
-    manifest.records[item.url] = record_from_validation(
-        snapshot,
-        file_path,
-        final_markdown,
-        final_result,
-        item.title,
-    )
+    with _manifest_lock:
+        manifest.records[item.url] = record_from_validation(
+            snapshot,
+            file_path,
+            final_markdown,
+            final_result,
+            item.title,
+        )
     if mode == ExportMode.FORCE:
         status = "refreshed"
     elif file_path.exists() and existing_markdown is not None:
@@ -1670,17 +1728,27 @@ def export_collection_with_integrity(
         collection_url=collection_url,
     )
     total_items = len(result.exportable_items)
-    for index, item in enumerate(result.exportable_items, start=1):
-        logging.info(f"校验 {collection_name} [{index}/{total_items}]: {item.title}")
-        item_report = export_item_with_integrity(
-            item,
-            collection_dir,
-            manifest,
-            mode=mode,
-        )
-        collection_report["items"].append(item_report)
-        if item.url in manifest.records:
-            manifest.save()
+    # 项级并发导出：IO 密集（正文 API + 图片下载），并发数由 ITEM_EXPORT_WORKERS 控制；
+    # 清单读写通过 _manifest_lock 互斥，每项完成后仍即时落盘。
+    with ThreadPoolExecutor(max_workers=ITEM_EXPORT_WORKERS) as executor:
+        futures = []
+        for index, item in enumerate(result.exportable_items, start=1):
+            logging.info(f"校验 {collection_name} [{index}/{total_items}]: {item.title}")
+            futures.append(
+                executor.submit(
+                    export_item_with_integrity,
+                    item,
+                    collection_dir,
+                    manifest,
+                    mode=mode,
+                )
+            )
+        for future in as_completed(futures):
+            item_report = future.result()
+            collection_report["items"].append(item_report)
+            if item_report.get("url") in manifest.records:
+                with _manifest_lock:
+                    manifest.save()
     failures = [
         item for item in collection_report["items"]
         if item["status"] in {
