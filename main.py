@@ -1471,15 +1471,21 @@ def export_item_with_integrity(
     else:
         file_path = pathlib.Path(get_unique_filename(str(collection_path), item.title, item.url))
 
-    try:
-        metadata = fetch_metadata_fn(item)
-    except Exception as exc:
-        return {
-            "name": item.title,
-            "url": item.url,
-            "status": "metadata_failed",
-            "issues": [{"code": "metadata_failed", "message": str(exc)}],
-        }
+    metadata = None
+    if item.updated_time is not None:
+        # 收藏夹分页响应自带 updated_time（与回答/专栏 API 同源同值），直接复用，
+        # 省去逐项元数据请求；时间戳未变化且本地完好时整项零网络请求。
+        metadata = SourceMetadata(item.url, item.source_type, item.source_id, item.updated_time)
+    else:
+        try:
+            metadata = fetch_metadata_fn(item)
+        except Exception as exc:
+            return {
+                "name": item.title,
+                "url": item.url,
+                "status": "metadata_failed",
+                "issues": [{"code": "metadata_failed", "message": str(exc)}],
+            }
 
     local_intact = local_record_is_intact(record, file_path, assets_dir)
     action = decide_action(

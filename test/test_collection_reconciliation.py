@@ -23,6 +23,7 @@ def answer_item(index):
             "type": "answer",
             "url": f"https://www.zhihu.com/question/1/answer/{index}",
             "question": {"title": f"Answer {index}"},
+            "updated_time": 1700000000 + index,
         }
     }
 
@@ -33,6 +34,7 @@ def article_item(index):
             "type": "article",
             "url": f"https://zhuanlan.zhihu.com/p/{index}",
             "title": f"Article {index}",
+            "updated": 1800000000 + index,
         }
     }
 
@@ -246,6 +248,25 @@ class CollectionReconciliationTests(unittest.TestCase):
         )
         self.assertFalse(result.complete)
         self.assertEqual(result.page_failures[0]["error"], "collection_total_unavailable")
+
+    def test_add_raw_item_extracts_answer_and_article_updated_time(self):
+        result = main.CollectionFetchResult("123", 2)
+        result.add_raw_item(answer_item(5))
+        result.add_raw_item(article_item(7))
+        answer, article = result.exportable_items
+        self.assertEqual(answer.updated_time, 1700000005)
+        self.assertEqual(article.updated_time, 1800000007)
+
+    def test_add_raw_item_allows_missing_updated_time(self):
+        result = main.CollectionFetchResult("123", 1)
+        result.add_raw_item(
+            {"content": {
+                "type": "answer",
+                "url": "https://www.zhihu.com/question/1/answer/9",
+                "question": {"title": "No timestamp"},
+            }}
+        )
+        self.assertIsNone(result.exportable_items[0].updated_time)
 
 if __name__ == "__main__":
     unittest.main()

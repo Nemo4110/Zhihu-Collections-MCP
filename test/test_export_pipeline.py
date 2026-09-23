@@ -65,13 +65,58 @@ class ExportPipelineTests(unittest.TestCase):
     def test_valid_existing_file_without_manifest_is_adopted_without_rewrite(self):
         with workspace_directory() as directory:
             path = directory / "Example.md"
-            path.write_text(self.valid_markdown, encoding="utf-8")
+            path.write_text(self.valid_markdown, encoding="utf-8", newline="")
             before = path.stat().st_mtime_ns
             store = self.make_store(directory)
             result = self.call_pipeline(directory, store, ExportMode.BALANCED)
             self.assertEqual(result["status"], "adopted")
             self.assertEqual(path.stat().st_mtime_ns, before)
             self.assertEqual(store.records[self.url]["status"], "verified")
+
+    def test_favlist_timestamp_match_skips_metadata_request(self):
+        with workspace_directory() as directory:
+            path = directory / "Example.md"
+            path.write_text(self.valid_markdown, encoding="utf-8", newline="")
+            store = self.make_store(directory)
+            result = self.call_pipeline(directory, store, ExportMode.BALANCED)
+            self.assertEqual(result["status"], "adopted")
+            self.assertEqual(store.records[self.url]["source_updated_time"], 100)
+
+            # 收藏夹分页自带的时间戳与清单一致时，不应再发起任何网络请求
+            item_with_time = CollectionItem("Example", self.url, "answer", "2", 100)
+            result = main.export_item_with_integrity(
+                item_with_time,
+                directory,
+                store,
+                ExportMode.BALANCED,
+                fetch_metadata_fn=lambda _: (_ for _ in ()).throw(AssertionError("不应请求元数据")),
+                fetch_snapshot_fn=lambda _: (_ for _ in ()).throw(AssertionError("不应抓取内容")),
+                render_markdown_fn=lambda snapshot, item: self.valid_markdown,
+            )
+            self.assertEqual(result["status"], "skipped_verified")
+
+    def test_favlist_timestamp_change_triggers_refetch(self):
+        with workspace_directory() as directory:
+            path = directory / "Example.md"
+            path.write_text(self.valid_markdown, encoding="utf-8", newline="")
+            store = self.make_store(directory)
+            result = self.call_pipeline(directory, store, ExportMode.BALANCED)
+            self.assertEqual(result["status"], "adopted")
+
+            # 时间戳变化应触发重新抓取，而不是跳过
+            item_stale = CollectionItem("Example", self.url, "answer", "2", 200)
+            result = main.export_item_with_integrity(
+                item_stale,
+                directory,
+                store,
+                ExportMode.BALANCED,
+                fetch_metadata_fn=lambda _: self.metadata,
+                fetch_snapshot_fn=lambda _: self.snapshot,
+                render_markdown_fn=lambda snapshot, item: self.valid_markdown,
+            )
+            self.assertNotEqual(result["status"], "skipped_verified")
+            # 清单记录的是重新抓取到的快照元数据时间戳
+            self.assertEqual(store.records[self.url]["source_updated_time"], 100)
 
     def test_invalid_existing_file_is_repaired_in_balanced_mode(self):
         with workspace_directory() as directory:

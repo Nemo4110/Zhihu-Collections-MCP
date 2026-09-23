@@ -561,6 +561,9 @@ class CollectionItem:
     url: str
     source_type: str
     source_id: str
+    # 收藏夹分页响应自带的源内容更新时间（回答为 content.updated_time，专栏为 content.updated），
+    # 与回答/专栏 API 返回的时间戳同源同值，可省去逐项元数据请求。
+    updated_time: int | None = None
 
 
 @dataclass(frozen=True)
@@ -601,8 +604,12 @@ class CollectionFetchResult:
         try:
             if source_type == "answer":
                 title = str(content["question"]["title"])
+                updated_time = content.get("updated_time")
             else:
                 title = str(content["title"])
+                updated_time = content.get("updated")
+                if updated_time is None:
+                    updated_time = content.get("updated_time")
             canonical_url = canonicalize_url(url)
             parsed_type, source_id = parse_source_identity(canonical_url)
             if parsed_type != source_type:
@@ -617,7 +624,7 @@ class CollectionFetchResult:
             return
         self._seen_urls.add(canonical_url)
         self.exportable_items.append(
-            CollectionItem(title, canonical_url, source_type, source_id)
+            CollectionItem(title, canonical_url, source_type, source_id, updated_time)
         )
 
     def reconcile(self) -> bool:
