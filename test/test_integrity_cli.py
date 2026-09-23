@@ -39,6 +39,12 @@ class IntegrityCliTests(unittest.TestCase):
             ExportMode.BALANCED,
         )
 
+    def test_parse_page_candidates_flags_are_mutually_exclusive(self):
+        self.assertFalse(main.parse_args([]).page_candidates)
+        self.assertTrue(main.parse_args(["--page-candidates"]).page_candidates)
+        with self.assertRaises(SystemExit):
+            main.parse_args(["--page-candidates", "--no-page-candidates"])
+
     def test_invalid_mode_combinations_exit_two(self):
         with self.assertRaises(SystemExit) as repair_only:
             main.parse_args(["--repair"])

@@ -865,16 +865,20 @@ def fetch_answer_metadata(answer_url, request_get=None):
 
 
 # 知乎网页候选抓取受反爬限流影响，失败率会随请求量累积（典型的 403 限流）。
+# 默认懒升级：仅当 API 候选缺失/失败时才抓取网页候选，避免常态下被限流拖慢。
 # 连续失败达到上限后熔断：本次运行剩余项目跳过网页候选抓取，仅依赖 API 候选校验。
 PAGE_CANDIDATES_ENABLED = True
+PAGE_CANDIDATES_EAGER = False
 PAGE_CANDIDATE_FAILURE_LIMIT = 5
 _page_candidate_failures = 0
 
 
-def _reset_page_candidate_state(enabled=True, failure_limit=5):
+def _reset_page_candidate_state(enabled=True, failure_limit=5, eager=False):
     """重置网页候选抓取状态（测试及 MCP 入口可复用）。"""
-    global PAGE_CANDIDATES_ENABLED, PAGE_CANDIDATE_FAILURE_LIMIT, _page_candidate_failures
+    global PAGE_CANDIDATES_ENABLED, PAGE_CANDIDATES_EAGER
+    global PAGE_CANDIDATE_FAILURE_LIMIT, _page_candidate_failures
     PAGE_CANDIDATES_ENABLED = enabled
+    PAGE_CANDIDATES_EAGER = eager
     PAGE_CANDIDATE_FAILURE_LIMIT = failure_limit
     _page_candidate_failures = 0
 
@@ -907,6 +911,7 @@ def fetch_answer_snapshots(answer_url, request_get=None):
     except Exception:
         metadata = SourceMetadata(canonical_url, source_type, answer_id, None)
     candidates = []
+    api_candidate_ok = False
     try:
         api_response = request_get(
             f"https://www.zhihu.com/api/v4/answers/{answer_id}?include=content,updated_time",
@@ -924,9 +929,12 @@ def fetch_answer_snapshots(answer_url, request_get=None):
             candidates.append(
                 snapshot_from_html(api_metadata, "answer_api", payload["content"])
             )
+            api_candidate_ok = True
     except Exception as exc:
         logging.warning(f"回答API候选获取失败: {canonical_url}: {exc}")
-    if _page_candidates_available():
+    # 懒升级：API 候选成功时不抓网页候选（常态下省一次易被限流的请求），
+    # 仅当 API 候选缺失/失败，或显式开启急切模式（--page-candidates）时才尝试网页。
+    if _page_candidates_available() and (not api_candidate_ok or PAGE_CANDIDATES_EAGER):
         try:
             page_response = request_get(
                 canonical_url,
@@ -1696,9 +1704,16 @@ def parse_args(argv=None):
     parser.add_argument(
         "--no-page-candidates",
         action="store_true",
-        help="跳过回答网页候选抓取，仅使用API候选校验（网页请求易被限流403）",
+        help="完全禁用回答网页候选抓取，仅用 API 候选校验",
+    )
+    parser.add_argument(
+        "--page-candidates",
+        action="store_true",
+        help="急切抓取回答网页候选（默认仅当 API 候选失败时才尝试网页候选）",
     )
     args = parser.parse_args(argv)
+    if args.no_page_candidates and args.page_candidates:
+        parser.error("--page-candidates 与 --no-page-candidates 不能同时使用")
     if args.repair and not args.audit:
         parser.error("--repair 必须与 --audit 一起使用")
     if args.audit and args.force:
@@ -1750,10 +1765,13 @@ def save_integrity_report(collection_reports, mode, logs_dir=None, timestamp=Non
 
 
 def main(argv=None):
-    global config, base_output_path, current_collection_name, processing_log, PAGE_CANDIDATES_ENABLED
+    global config, base_output_path, current_collection_name, processing_log
+    global PAGE_CANDIDATES_ENABLED, PAGE_CANDIDATES_EAGER
     args = parse_args(argv)
     if args.no_page_candidates:
         PAGE_CANDIDATES_ENABLED = False
+    if args.page_candidates:
+        PAGE_CANDIDATES_EAGER = True
     config = load_config()
 
     if config.get('outputPath'):
@@ -1779,6 +1797,8 @@ def main(argv=None):
     print(f"运行模式: {args.mode.value}")
     if args.no_page_candidates:
         logging.info("已启用 --no-page-candidates，本次运行跳过回答网页候选抓取")
+    if args.page_candidates:
+        logging.info("已启用 --page-candidates，本次运行将急切抓取回答网页候选")
     print(f"共找到 {len(zhihu_collections)} 个收藏夹待处理")
     collection_reports = []
     for collection in zhihu_collections:

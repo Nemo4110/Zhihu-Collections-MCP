@@ -123,7 +123,7 @@ class SourceCandidateTests(unittest.TestCase):
         )
         self.assertEqual(metadata.updated_time, 777)
 
-    def test_fetch_answer_snapshots_keeps_api_and_page_candidates(self):
+    def test_fetch_answer_snapshots_keeps_api_and_page_candidates_when_eager(self):
         def request_get(url, **kwargs):
             if "include=updated_time" in url:
                 return FakeResponse(payload={"id": 2, "updated_time": 777})
@@ -131,11 +131,46 @@ class SourceCandidateTests(unittest.TestCase):
                 return FakeResponse(payload={"content": "<p>Long authenticated API content.</p>"})
             return FakeResponse(text='<div class="RichContent-inner"><p>Short page.</p></div>')
 
+        main._reset_page_candidate_state(eager=True)
         snapshots = main.fetch_answer_snapshots(
             "https://www.zhihu.com/question/1/answer/2",
             request_get=request_get,
         )
         self.assertEqual({item.candidate for item in snapshots}, {"answer_api", "answer_page"})
+
+    def test_fetch_answer_snapshots_skips_page_candidates_when_api_succeeds(self):
+        requested_urls = []
+
+        def request_get(url, **kwargs):
+            requested_urls.append(url)
+            if "/api/v4/answers/" in url:
+                return FakeResponse(payload={"content": "<p>API-only candidate content.</p>"})
+            return FakeResponse(text='<div class="RichContent-inner"><p>Page.</p></div>')
+
+        snapshots = main.fetch_answer_snapshots(
+            "https://www.zhihu.com/question/1/answer/2",
+            request_get=request_get,
+        )
+
+        self.assertEqual([item.candidate for item in snapshots], ["answer_api"])
+        self.assertNotIn("https://www.zhihu.com/question/1/answer/2", requested_urls)
+
+    def test_fetch_answer_snapshots_falls_back_to_page_when_api_fails(self):
+        requested_urls = []
+
+        def request_get(url, **kwargs):
+            requested_urls.append(url)
+            if "/api/v4/answers/" in url:
+                return FakeResponse(payload={"content": ""})
+            return FakeResponse(text='<div class="RichContent-inner"><p>Page fallback.</p></div>')
+
+        snapshots = main.fetch_answer_snapshots(
+            "https://www.zhihu.com/question/1/answer/2",
+            request_get=request_get,
+        )
+
+        self.assertIn("https://www.zhihu.com/question/1/answer/2", requested_urls)
+        self.assertEqual([item.candidate for item in snapshots], ["answer_page"])
 
     def test_fetch_answer_snapshots_skips_page_candidates_when_disabled(self):
         requested_urls = []
@@ -156,7 +191,7 @@ class SourceCandidateTests(unittest.TestCase):
         self.assertNotIn("https://www.zhihu.com/question/1/answer/2", requested_urls)
 
     def test_page_candidate_failures_trip_circuit_breaker(self):
-        main._reset_page_candidate_state(failure_limit=3)
+        main._reset_page_candidate_state(failure_limit=3, eager=True)
         page_urls_requested = []
 
         def request_get(url, **kwargs):
@@ -175,7 +210,7 @@ class SourceCandidateTests(unittest.TestCase):
         self.assertEqual([item.candidate for item in snapshots], ["answer_api"])
 
     def test_page_candidate_failure_counter_resets_on_success(self):
-        main._reset_page_candidate_state(failure_limit=5)
+        main._reset_page_candidate_state(failure_limit=5, eager=True)
         page_urls_requested = []
 
         def request_get(url, **kwargs):
