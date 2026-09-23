@@ -6,13 +6,22 @@
 import os
 import json
 import requests
-from bs4 import BeautifulSoup
 import time
 import random
 import logging
 from datetime import datetime
 import pathlib
 import platform
+
+# 收藏夹列表 API 的公共请求头和分页大小
+API_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Connection": "keep-alive",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Referer": "https://www.zhihu.com/collections/mine",
+}
+COLLECTIONS_PAGE_LIMIT = 20
 
 
 def get_current_os():
@@ -129,54 +138,69 @@ def load_config():
         return None
 
 
-def get_collections_from_page(page_num=1, cookies=None):
+def get_url_token(cookies=None):
     """
-    从知乎的收藏夹页面获取收藏夹信息
+    通过知乎 API 获取当前登录用户的 url_token
+    :param cookies: cookies字典
+    :return: url_token 字符串，失败时返回 None
+    """
+    try:
+        response = requests.get(
+            "https://www.zhihu.com/api/v4/me",
+            headers=API_HEADERS,
+            cookies=cookies,
+            timeout=15
+        )
+        response.raise_for_status()
+        data = response.json()
+        url_token = data.get("url_token")
+        if url_token:
+            logging.info(f"获取到当前用户 url_token: {url_token}")
+            return url_token
+
+        logging.error(f"API 未返回用户信息，cookies 可能已过期: {str(data)[:200]}")
+        return None
+    except Exception as e:
+        logging.error(f"获取用户信息失败（cookies 可能已过期）: {str(e)}")
+        return None
+
+
+def get_collections_from_page(page_num=1, cookies=None, url_token=None):
+    """
+    通过知乎收藏夹列表 API 获取收藏夹信息
+    （旧版通过 /collections/mine 网页解析 SelfCollectionItem，页面改版后已失效）
     :param page_num: 页码
     :param cookies: cookies字典
+    :param url_token: 当前用户 url_token
     :return: 收藏夹列表和是否有更多项目
     """
-    url = f"https://www.zhihu.com/collections/mine?page={page_num}"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36",
-        "Connection": "keep-alive",
-        "Accept": "text/html,application/json,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.8"
-    }
-    
+    if not url_token:
+        logging.error("缺少 url_token，无法请求收藏夹列表 API")
+        return [], False
+
+    offset = (page_num - 1) * COLLECTIONS_PAGE_LIMIT
+    url = f"https://www.zhihu.com/api/v4/people/{url_token}/collections?limit={COLLECTIONS_PAGE_LIMIT}&offset={offset}"
+
     try:
-        response = requests.get(url, headers=headers, cookies=cookies)
+        response = requests.get(url, headers=API_HEADERS, cookies=cookies, timeout=15)
         response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # 查找所有的SelfCollectionItem
-        collection_items = soup.find_all(class_='SelfCollectionItem')
+
+        data = response.json()
+        collection_items = data.get("data", [])
         collections = []
-        
+
         for item in collection_items:
-            # 查找标题元素
-            title_element = item.find(class_='SelfCollectionItem-title')
-            if title_element:
-                # 获取收藏夹名称
-                name = title_element.get_text(strip=True)
-                
-                # 获取href链接
-                link_element = title_element.find('a')
-                if link_element and link_element.get('href'):
-                    href = link_element.get('href')
-                    # 将相对链接转换为绝对链接
-                    if href.startswith('/'):
-                        href = 'https://www.zhihu.com' + href
-                    
-                    collections.append({
-                        'name': name,
-                        'url': href
-                    })
-        
+            # 收藏夹 id 和标题构成配置项
+            collection_id = item.get("id")
+            title = item.get("title")
+            if collection_id and title:
+                collections.append({
+                    'name': title,
+                    'url': f"https://www.zhihu.com/collection/{collection_id}"
+                })
+
         return collections, len(collection_items) > 0
-        
+
     except Exception as e:
         logging.error(f"获取第{page_num}页收藏夹失败: {str(e)}")
         return [], False
@@ -188,14 +212,20 @@ def get_all_collections(cookies=None):
     :param cookies: cookies字典
     :return: 所有收藏夹列表
     """
+    url_token = get_url_token(cookies)
+    if not url_token:
+        logging.error("无法获取用户 url_token，请检查 cookies 是否过期")
+        print("无法获取用户 url_token，请检查 cookies 是否过期")
+        return []
+
     all_collections = []
     page = 1
-    
+
     while True:
         logging.info(f"正在获取第{page}页收藏夹...")
         print(f"正在获取第{page}页收藏夹...")
-        
-        collections, has_items = get_collections_from_page(page, cookies)
+
+        collections, has_items = get_collections_from_page(page, cookies, url_token)
         
         if not has_items:
             logging.info(f"第{page}页没有更多收藏夹，结束获取")
