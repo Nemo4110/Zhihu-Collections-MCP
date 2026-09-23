@@ -365,7 +365,20 @@ def validate_markdown(
     for image_url in snapshot.image_urls:
         filename = image_filename_from_url(image_url)
         asset_path = asset_root / filename
-        if filename not in markdown:
+        # 引用判断使用 assets/ 前缀，避免文件名恰好是源 URL 子串时误判
+        local_reference = f"assets/{filename}" in markdown
+        # 远端资源失效时渲染会退回源 URL 引用：记 warning 而非硬失败，
+        # 正文文本完整性不受影响；下次运行 local 校验不通过会自动重试。
+        remote_fallback = not local_reference and image_url in markdown
+        if remote_fallback:
+            status = "remote_fallback"
+            warnings.append(
+                IntegrityIssue(
+                    "asset_remote_fallback",
+                    f"Asset {filename} unavailable remotely, kept source URL",
+                )
+            )
+        elif not local_reference:
             status = "missing_reference"
             issues.append(IntegrityIssue("missing_asset_reference", f"Markdown does not reference {filename}"))
         elif not asset_path.exists():

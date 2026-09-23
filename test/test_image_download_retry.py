@@ -76,29 +76,22 @@ class ImageDownloadRetryTests(unittest.TestCase):
             self.assertEqual(asset.read_bytes(), b"existing-image")
             self.assertEqual(rendered, "![chart](assets/image.jpg)")
 
-    def test_existing_non_empty_asset_is_reused_after_retry_exhaustion(self):
+    def test_dead_remote_image_degrades_to_source_url_reference(self):
         with workspace_directory() as directory:
-            asset = directory / "Images" / "assets" / "image.jpg"
-            asset.parent.mkdir(parents=True)
-            # 本地只有空文件（视为无效），下载重试耗尽后不能保留空文件覆盖语义
-            asset.write_bytes(b"")
-
             with (
                 patch.object(main, "base_output_path", directory),
                 patch.object(main, "current_collection_name", "Images"),
                 patch.object(
                     main.requests,
                     "get",
-                    side_effect=requests.ConnectionError("reset"),
+                    side_effect=requests.HTTPError("404 Client Error"),
                 ) as request_get,
-                patch.object(main.time, "sleep") as sleep,
             ):
-                with self.assertRaises(requests.ConnectionError):
-                    main.ObsidianStyleConverter().convert_img(self.make_image(), "")
+                rendered = main.ObsidianStyleConverter().convert_img(self.make_image(), "")
 
             self.assertEqual(request_get.call_count, 3)
-            self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
-            self.assertEqual(asset.stat().st_size, 0)
+            self.assertFalse((directory / "Images" / "assets" / "image.jpg").exists())
+            self.assertEqual(rendered, "![chart](https://pic.zhimg.com/image.jpg)")
 
 
 class PrefetchImagesTests(unittest.TestCase):

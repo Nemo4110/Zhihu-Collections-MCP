@@ -86,6 +86,28 @@ class IntegrityValidationTests(unittest.TestCase):
             )
         self.assertIn("missing_source_url", [issue.code for issue in result.issues])
 
+    def test_remote_fallback_image_is_warning_not_issue(self):
+        snapshot = snapshot_from_html(
+            self.metadata,
+            "answer_api",
+            "<p>Complete text paragraph one.</p>"
+            '<img src="https://picx.zhimg.com/dead.jpg">'
+            "<p>Complete text paragraph two.</p>",
+        )
+        remote_url = "https://picx.zhimg.com/dead.jpg"
+        markdown = (
+            f"> {self.metadata.canonical_url}\n"
+            "Complete text paragraph one.\n\n"
+            f"![alt]({remote_url})\n\n"
+            "Complete text paragraph two.\n"
+        )
+        with workspace_directory() as assets_dir:
+            result = validate_markdown(snapshot, markdown, assets_dir)
+        self.assertTrue(result.valid, [issue.code for issue in result.issues])
+        self.assertIn("asset_remote_fallback", [w.code for w in result.warnings])
+        fallback_assets = [a for a in result.assets if a["status"] == "remote_fallback"]
+        self.assertEqual(len(fallback_assets), 1)
+
     def test_missing_image_fails_and_existing_nonempty_image_passes(self):
         snapshot = snapshot_from_html(
             self.metadata,

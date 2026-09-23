@@ -534,9 +534,13 @@ class ObsidianStyleConverter(MarkdownConverter):
                     img_content = _download_image_content(src)
                     with open(imgPath, 'wb') as fp:
                         fp.write(img_content)
-                except requests.RequestException:
+                except requests.RequestException as exc:
                     if not _asset_file_ready(imgPath):
-                        raise
+                        # 远端资源已失效（如 404 死链）时降级为远程引用，保证正文完整导出；
+                        # 该项记为 warning，下次运行会自动重试，远端恢复后升级为本地备份。
+                        logging.warning(f"图片下载失败，降级为远程引用: {src}: {exc}")
+                        escaped_alt = alt.replace('\n', ' ').replace(']', r'\]')
+                        return f"![{escaped_alt}]({src})"
                     logging.warning(f"图片下载失败，复用已有资源: {src}")
 
             escaped_alt = alt.replace('\n', ' ').replace(']', r'\]')
