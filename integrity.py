@@ -9,6 +9,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -105,7 +106,7 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def atomic_write_text(path: str | Path, text: str) -> None:
+def atomic_write_text(path: str | Path, text: str, replace_attempts: int = 4) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
@@ -123,8 +124,17 @@ def atomic_write_text(path: str | Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary_path, destination)
-        temporary_path = None
+        # OneDrive 等同步盘可能短暂锁定目标文件，os.replace 报 WinError 5；
+        # 以短退避重试覆盖同步窗口，避免清单落盘失败。
+        for attempt in range(replace_attempts):
+            try:
+                os.replace(temporary_path, destination)
+                temporary_path = None
+                break
+            except PermissionError:
+                if attempt + 1 == replace_attempts:
+                    raise
+                time.sleep(0.05 * (2 ** attempt))
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)

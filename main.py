@@ -243,13 +243,18 @@ def get_output_path(collection_name):
     否则使用默认的downloads路径
     """
     global base_output_path
-    
+
+    # 收藏夹名可能含路径分隔符等非法字符（如 "C/C++"），清理为安全的目录名
+    safe_name = filter_title_str(collection_name).strip()
+    if not safe_name:
+        safe_name = "未命名收藏夹"
+
     if base_output_path:
         # 使用自定义输出路径
-        return os.path.join(str(base_output_path), collection_name)
+        return os.path.join(str(base_output_path), safe_name)
     else:
         # 使用默认路径
-        return os.path.join(os.path.dirname(__file__), 'downloads', collection_name)
+        return os.path.join(os.path.dirname(__file__), 'downloads', safe_name)
 
 def get_logs_path():
     """
@@ -1750,9 +1755,13 @@ def export_collection_with_integrity(
         for future in as_completed(futures):
             item_report = future.result()
             collection_report["items"].append(item_report)
-            if item_report.get("url") in manifest.records:
-                with _manifest_lock:
-                    manifest.save()
+            try:
+                if item_report.get("url") in manifest.records:
+                    with _manifest_lock:
+                        manifest.save()
+            except OSError as exc:
+                # 同步盘锁定等瞬时故障：清单在下一项完成时会再次落盘，不应让整项/收藏夹失败
+                logging.warning(f"清单保存失败（将在下一项完成时重试）: {exc}")
     failures = [
         item for item in collection_report["items"]
         if item["status"] in {
