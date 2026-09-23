@@ -80,7 +80,7 @@ python main.py --page-candidates
 
 回答校验默认懒升级：优先使用 API 候选，仅当 API 候选失败/缺失时才抓取网页候选（`--page-candidates` 可恢复急切双候选模式）；网页候选连续失败 5 次（`PAGE_CANDIDATE_FAILURE_LIMIT`，疑似限流累积）后自动熔断，本次运行剩余项目仅用 API 候选校验。进度与日志统一通过 `logging` 输出（不使用 tqdm），格式为 `时间 - 级别 - [文件名:行号] - 消息`，每项内容一行进度（`校验 <收藏夹> [i/N]: 标题`）。
 
-每个收藏夹目录包含 `.zhihu-integrity.json`；每次运行在输出目录的 `logs/` 下生成 `integrity_*.json`。文本覆盖率 `0.90-0.98` 且无硬错误时记录为 `verified_with_warnings`，不导致非零退出码；硬性支持内容验证失败返回 1，配置/分页/清单结构失败返回 2。`pin`/想法会明确报告为不支持类型，但不会导致其他回答和专栏失败。专栏正文优先使用 `zhuanlan.zhihu.com/api/articles/{id}`，失败后回退网页解析；图片下载有三次有界重试并可复用已有非空资源。 收藏夹分页遵循 `paging.next/is_end`；已到末页但 API 报告总数大于可见项目数时记录 `total_mismatch` 和收藏夹 warning，不重复边界条目。
+每个收藏夹目录包含 `.zhihu-integrity.json`；每次运行在输出目录的 `logs/` 下生成 `integrity_*.json`。文本覆盖率 `0.90-0.98` 且无硬错误时记录为 `verified_with_warnings`，不导致非零退出码；硬性支持内容验证失败返回 1，配置/分页/清单结构失败返回 2。`pin`/想法会明确报告为不支持类型，但不会导致其他回答和专栏失败。专栏正文优先使用 `zhuanlan.zhihu.com/api/articles/{id}`，失败后回退网页解析；图片下载有三次有界重试并可复用已有非空资源。 收藏夹分页遵循 `paging.next/is_end`，项目总数直接取自第一页响应的 `paging.totals`（缺失时回退独立总数请求）；已到末页但 API 报告总数大于可见项目数时记录 `total_mismatch` 和收藏夹 warning，不重复边界条目。
 
 隔离 worktree 可通过 `ZHIHU_COOKIES_FILE` 引用主检出中被忽略的 Cookie 文件，禁止将 Cookie 内容写入代码、测试、日志或 Git。
 

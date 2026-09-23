@@ -642,28 +642,15 @@ def fetch_collection_items(
     sleep = sleep or time.sleep
     logging.info(f"开始获取收藏夹 {collection_id} 的完整项目列表")
 
-    try:
-        expected_total = get_total(collection_id)
-    except Exception as exc:
-        result = CollectionFetchResult(collection_id, 0)
-        result.page_failures.append({"offset": 0, "error": str(exc)})
-        result.reconcile()
-        return result
-
-    if expected_total is None:
-        result = CollectionFetchResult(collection_id, 0)
-        result.page_failures.append({"offset": 0, "error": "collection_total_unavailable"})
-        result.reconcile()
-        return result
-    result = CollectionFetchResult(collection_id, int(expected_total))
-    if result.expected_total == 0:
-        result.reconcile()
-        return result
-
     limit = 20
     offset = 0
     visited_offsets = set()
-    while offset < result.expected_total:
+    # 总数优先从第一页分页响应的 paging.totals 读取（省一次独立请求），
+    # 响应缺失该字段时才回退到 get_total 请求。
+    result = None
+    while True:
+        if result is not None and offset >= result.expected_total:
+            break
         if offset in visited_offsets:
             result.page_failures.append({"offset": offset, "error": "paging_offset_loop"})
             break
@@ -695,11 +682,40 @@ def fetch_collection_items(
                 if attempt < attempts - 1:
                     sleep(2 ** attempt)
         if payload is None:
+            if result is None:
+                result = CollectionFetchResult(collection_id, 0)
             result.page_failures.append({"offset": offset, "error": str(last_error)})
             break
 
         page_items = payload['data']
         logging.info(f"成功获取 {len(page_items)} 个原始项目")
+
+        if result is None:
+            paging_info = payload.get("paging")
+            totals = (
+                paging_info.get("totals")
+                if isinstance(paging_info, dict)
+                else None
+            )
+            if totals is None:
+                try:
+                    totals = get_total(collection_id)
+                except Exception as exc:
+                    result = CollectionFetchResult(collection_id, 0)
+                    result.page_failures.append({"offset": 0, "error": str(exc)})
+                    result.reconcile()
+                    return result
+            if totals is None:
+                result = CollectionFetchResult(collection_id, 0)
+                result.page_failures.append({"offset": 0, "error": "collection_total_unavailable"})
+                result.reconcile()
+                return result
+            logging.info(f"收藏夹 {collection_id} 包含 {totals} 个项目")
+            result = CollectionFetchResult(collection_id, int(totals))
+            if result.expected_total == 0:
+                result.reconcile()
+                return result
+
         for raw_item in page_items:
             result.add_raw_item(raw_item)
 

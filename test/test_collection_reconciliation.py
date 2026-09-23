@@ -268,5 +268,41 @@ class CollectionReconciliationTests(unittest.TestCase):
         )
         self.assertIsNone(result.exportable_items[0].updated_time)
 
+    def test_first_page_paging_totals_avoids_extra_total_request(self):
+        offsets = []
+        pages = {
+            0: {
+                "data": [answer_item(index) for index in range(20)],
+                "paging": {
+                    "totals": 25,
+                    "is_end": False,
+                    "next": "https://www.zhihu.com/api/v4/collections/123/items?limit=20&offset=20",
+                },
+            },
+            20: {
+                "data": [answer_item(index) for index in range(20, 25)],
+                "paging": {"totals": 25, "is_end": True},
+            },
+        }
+
+        def request_get(url, **kwargs):
+            offset = int(url.split("offset=")[1].split("&")[0])
+            offsets.append(offset)
+            return FakeResponse(pages[offset])
+
+        def fail_get_total(_):
+            raise AssertionError("第一页已含 paging.totals，不应再请求总数")
+
+        result = main.fetch_collection_items(
+            "123",
+            request_get=request_get,
+            get_total=fail_get_total,
+            sleep=lambda _: None,
+        )
+        self.assertEqual(offsets, [0, 20])
+        self.assertTrue(result.complete)
+        self.assertEqual(result.raw_item_count, 25)
+        self.assertEqual(result.expected_total, 25)
+
 if __name__ == "__main__":
     unittest.main()
