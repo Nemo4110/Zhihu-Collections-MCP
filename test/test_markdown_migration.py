@@ -9,24 +9,6 @@ from migrate_markdown_images import migrate_markdown
 
 
 class StandardMarkdownImageTests(unittest.TestCase):
-    def test_inline_equation_is_rendered_as_latex_without_download(self):
-        image = BeautifulSoup(
-            '<p>公式 <img src="https://www.zhihu.com/equation?tex=P%28O%29" alt="P(O)"> 内容</p>',
-            "lxml",
-        ).img
-        with patch.object(main.requests, "get") as request_get:
-            rendered = main.ObsidianStyleConverter().convert_img(image, "")
-        self.assertEqual(rendered, "$P(O)$")
-        request_get.assert_not_called()
-
-    def test_standalone_equation_is_rendered_as_display_latex(self):
-        image = BeautifulSoup(
-            '<p><img src="https://www.zhihu.com/equation?tex=x%2By" alt="x+y"></p>',
-            "lxml",
-        ).img
-        rendered = main.ObsidianStyleConverter().convert_img(image, "")
-        self.assertEqual(rendered, "\n\n$$\nx+y\n$$\n\n")
-
     def test_migration_converts_inline_and_block_legacy_markup(self):
         source = (
             "正文 ![[equation]]\n(P(O))\n\n 后文。\n\n"

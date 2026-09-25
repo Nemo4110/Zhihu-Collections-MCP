@@ -41,6 +41,18 @@ API_HEADERS = {
 }
 
 
+_default_instance = None
+
+
+def default_client():
+    """进程内共享的默认客户端：惰性加载一次 Cookie。"""
+    global _default_instance
+    if _default_instance is None:
+        from paths_config import load_cookies
+        _default_instance = ZhihuClient(cookies=load_cookies())
+    return _default_instance
+
+
 class ZhihuClient:
     """知乎 HTTP 访问的唯一入口：注入传输与 Cookie，隐藏头部与重试。"""
 
