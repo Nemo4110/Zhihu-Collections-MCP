@@ -64,6 +64,29 @@ class SourceCandidateTests(unittest.TestCase):
         with self.assertRaises(SourceContentError):
             choose_best_snapshot([])
 
+    def test_fetch_source_snapshot_returns_best_candidate(self):
+        url = "https://www.zhihu.com/question/1/answer/2"
+
+        def request_get(url, **kwargs):
+            if "include=updated_time" in url:
+                return FakeResponse(payload={"id": 2, "updated_time": 777})
+            if "/api/v4/answers/" in url:
+                return FakeResponse(payload={"content": "<p>API 正文内容足够长，能被选中为最佳候选。</p>"})
+            return FakeResponse(text='<div class="RichContent-inner"><p>短</p></div>')
+
+        snapshot = sources.fetch_source_snapshot(url, request_get=request_get)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.candidate, "answer_api")
+
+    def test_fetch_source_snapshot_raises_when_no_candidates(self):
+        url = "https://www.zhihu.com/question/1/answer/2"
+
+        def request_get(url, **kwargs):
+            raise RuntimeError("HTTP 403")
+
+        with self.assertRaises(SourceContentError):
+            sources.fetch_source_snapshot(url, request_get=request_get)
+
     def test_answer_page_initial_json_can_beat_short_visible_container(self):
         payload = {
             "initialState": {

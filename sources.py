@@ -436,3 +436,4 @@ def fetch_source_snapshot(url, request_get=None):
         if source_type == "answer"
         else fetch_article_snapshots(url, request_get=request_get)
     )
+    return choose_best_snapshot(candidates)
