@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 import unittest
 
-import main
+import sources
+from integrity import CollectionFetchResult
 
 
 class FakeResponse:
@@ -49,7 +50,7 @@ class CollectionReconciliationTests(unittest.TestCase):
             count = 20 if offset < 40 else 5
             return FakeResponse({"data": [answer_item(offset + i) for i in range(count)]})
 
-        result = main.fetch_collection_items(
+        result = sources.fetch_collection_items(
             "123",
             request_get=request_get,
             get_total=lambda _: 45,
@@ -89,7 +90,7 @@ class CollectionReconciliationTests(unittest.TestCase):
             offsets.append(offset)
             return FakeResponse(pages[offset])
 
-        result = main.fetch_collection_items(
+        result = sources.fetch_collection_items(
             "123",
             request_get=request_get,
             get_total=lambda _: 49,
@@ -109,7 +110,7 @@ class CollectionReconciliationTests(unittest.TestCase):
                 {"content": {"type": "pin", "url": "https://www.zhihu.com/pin/9"}},
             ]
         }
-        result = main.fetch_collection_items(
+        result = sources.fetch_collection_items(
             "123",
             request_get=lambda *args, **kwargs: FakeResponse(payload),
             get_total=lambda _: 2,
@@ -130,7 +131,7 @@ class CollectionReconciliationTests(unittest.TestCase):
                 return FakeResponse(error=RuntimeError("network down"))
             return FakeResponse({"data": [answer_item(offset + i) for i in range(20)]})
 
-        result = main.fetch_collection_items(
+        result = sources.fetch_collection_items(
             "123",
             request_get=request_get,
             get_total=lambda _: 40,
@@ -144,7 +145,7 @@ class CollectionReconciliationTests(unittest.TestCase):
 
     def test_duplicates_are_recorded_and_raw_count_still_reconciles(self):
         payload = {"data": [answer_item(1), answer_item(1), article_item(3)]}
-        result = main.fetch_collection_items(
+        result = sources.fetch_collection_items(
             "123",
             request_get=lambda *args, **kwargs: FakeResponse(payload),
             get_total=lambda _: 3,
@@ -158,7 +159,7 @@ class CollectionReconciliationTests(unittest.TestCase):
 
     def test_empty_final_page_cannot_reconcile_nonzero_total(self):
         payload = {"data": [], "paging": {"is_end": True}}
-        result = main.fetch_collection_items(
+        result = sources.fetch_collection_items(
             "123",
             request_get=lambda *args, **kwargs: FakeResponse(payload),
             get_total=lambda _: 5,
@@ -170,7 +171,7 @@ class CollectionReconciliationTests(unittest.TestCase):
         self.assertIsNone(result.total_mismatch)
 
     def test_short_api_page_is_incomplete(self):
-        result = main.fetch_collection_items(
+        result = sources.fetch_collection_items(
             "123",
             request_get=lambda *args, **kwargs: FakeResponse({"data": [answer_item(1)]}),
             get_total=lambda _: 2,
@@ -186,7 +187,7 @@ class CollectionReconciliationTests(unittest.TestCase):
                 {"content": {"type": "article", "url": "https://zhuanlan.zhihu.com/p/7"}}
             ]
         }
-        result = main.fetch_collection_items(
+        result = sources.fetch_collection_items(
             "123",
             request_get=lambda *args, **kwargs: FakeResponse(payload),
             get_total=lambda _: 1,
@@ -199,7 +200,7 @@ class CollectionReconciliationTests(unittest.TestCase):
         def get_total(_):
             raise RuntimeError("total unavailable")
 
-        result = main.fetch_collection_items(
+        result = sources.fetch_collection_items(
             "123",
             request_get=lambda *args, **kwargs: FakeResponse({"data": []}),
             get_total=get_total,
@@ -215,7 +216,7 @@ class CollectionReconciliationTests(unittest.TestCase):
             attempts.append(url)
             return FakeResponse(error=RuntimeError("total down"))
 
-        total = main.get_article_nums_of_collection(
+        total = sources.get_article_nums_of_collection(
             "123",
             request_get=request_get,
             sleep=lambda _: None,
@@ -231,7 +232,7 @@ class CollectionReconciliationTests(unittest.TestCase):
             seen.update(kwargs)
             return FakeResponse({"paging": {"totals": 7}})
 
-        total = main.get_article_nums_of_collection(
+        total = sources.get_article_nums_of_collection(
             "123",
             request_get=request_get,
             sleep=lambda _: None,
@@ -240,7 +241,7 @@ class CollectionReconciliationTests(unittest.TestCase):
         self.assertEqual(seen["timeout"], 30)
 
     def test_none_total_is_incomplete(self):
-        result = main.fetch_collection_items(
+        result = sources.fetch_collection_items(
             "123",
             request_get=lambda *args, **kwargs: FakeResponse({"data": []}),
             get_total=lambda _: None,
@@ -250,7 +251,7 @@ class CollectionReconciliationTests(unittest.TestCase):
         self.assertEqual(result.page_failures[0]["error"], "collection_total_unavailable")
 
     def test_add_raw_item_extracts_answer_and_article_updated_time(self):
-        result = main.CollectionFetchResult("123", 2)
+        result = CollectionFetchResult("123", 2)
         result.add_raw_item(answer_item(5))
         result.add_raw_item(article_item(7))
         answer, article = result.exportable_items
@@ -258,7 +259,7 @@ class CollectionReconciliationTests(unittest.TestCase):
         self.assertEqual(article.updated_time, 1800000007)
 
     def test_add_raw_item_allows_missing_updated_time(self):
-        result = main.CollectionFetchResult("123", 1)
+        result = CollectionFetchResult("123", 1)
         result.add_raw_item(
             {"content": {
                 "type": "answer",
@@ -293,7 +294,7 @@ class CollectionReconciliationTests(unittest.TestCase):
         def fail_get_total(_):
             raise AssertionError("第一页已含 paging.totals，不应再请求总数")
 
-        result = main.fetch_collection_items(
+        result = sources.fetch_collection_items(
             "123",
             request_get=request_get,
             get_total=fail_get_total,

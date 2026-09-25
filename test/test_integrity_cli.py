@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import main
+import exporter
 from integrity import ExportMode
 
 
@@ -61,7 +62,7 @@ class IntegrityCliTests(unittest.TestCase):
                 "items": [{"status": "audit_verified"}, {"status": "skipped_verified"}],
             }
         ]
-        self.assertEqual(main.determine_exit_code(reports), 0)
+        self.assertEqual(exporter.determine_exit_code(reports), 0)
 
     def test_exit_code_one_for_item_integrity_failure(self):
         reports = [
@@ -71,7 +72,7 @@ class IntegrityCliTests(unittest.TestCase):
                 "items": [{"status": "invalid"}],
             }
         ]
-        self.assertEqual(main.determine_exit_code(reports), 1)
+        self.assertEqual(exporter.determine_exit_code(reports), 1)
 
     def test_exit_code_two_for_incomplete_collection(self):
         reports = [
@@ -81,11 +82,11 @@ class IntegrityCliTests(unittest.TestCase):
                 "items": [],
             }
         ]
-        self.assertEqual(main.determine_exit_code(reports), 2)
+        self.assertEqual(exporter.determine_exit_code(reports), 2)
 
     def test_integrity_report_is_written_atomically(self):
         with workspace_directory() as directory:
-            path = main.save_integrity_report(
+            path = exporter.save_integrity_report(
                 [{"status": "verified", "collection": {"complete": True}, "items": []}],
                 ExportMode.AUDIT,
                 logs_dir=directory,

@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import main
+import exporter
 from integrity import (
     CollectionFetchResult,
     CollectionItem,
@@ -53,7 +54,7 @@ class ExportPipelineTests(unittest.TestCase):
         )
 
     def call_pipeline(self, directory, store, mode, rendered=None):
-        return main.export_item_with_integrity(
+        return exporter.export_item_with_integrity(
             self.item,
             directory,
             store,
@@ -85,7 +86,7 @@ class ExportPipelineTests(unittest.TestCase):
 
             # 收藏夹分页自带的时间戳与清单一致时，不应再发起任何网络请求
             item_with_time = CollectionItem("Example", self.url, "answer", "2", 100)
-            result = main.export_item_with_integrity(
+            result = exporter.export_item_with_integrity(
                 item_with_time,
                 directory,
                 store,
@@ -106,7 +107,7 @@ class ExportPipelineTests(unittest.TestCase):
 
             # 时间戳变化应触发重新抓取，而不是跳过
             item_stale = CollectionItem("Example", self.url, "answer", "2", 200)
-            result = main.export_item_with_integrity(
+            result = exporter.export_item_with_integrity(
                 item_stale,
                 directory,
                 store,
@@ -187,7 +188,7 @@ class ExportPipelineTests(unittest.TestCase):
         rendered = f"> {self.url}\n{rendered_text}"
         with workspace_directory() as directory:
             store = self.make_store(directory)
-            result = main.export_item_with_integrity(
+            result = exporter.export_item_with_integrity(
                 self.item,
                 directory,
                 store,
@@ -219,23 +220,21 @@ class ExportPipelineTests(unittest.TestCase):
         fetch_result.reconcile()
 
         with workspace_directory() as directory:
-            with (
-                patch.object(main, "base_output_path", directory),
-                patch.object(
-                    main,
-                    "export_item_with_integrity",
-                    return_value={
-                        "name": "Example",
-                        "url": self.url,
-                        "status": "skipped_verified",
-                        "warnings": [],
-                    },
-                ),
+            with patch.object(
+                exporter,
+                "export_item_with_integrity",
+                return_value={
+                    "name": "Example",
+                    "url": self.url,
+                    "status": "skipped_verified",
+                    "warnings": [],
+                },
             ):
-                report = main.export_collection_with_integrity(
+                report = exporter.export_collection_with_integrity(
                     "Collection",
                     "https://www.zhihu.com/collection/1",
                     fetch_result=fetch_result,
+                    output_root=directory,
                 )
 
         self.assertEqual(report["status"], "verified_with_warnings")
@@ -269,14 +268,12 @@ class ExportPipelineTests(unittest.TestCase):
             }
 
         started = time.monotonic()
-        with (
-            patch.object(main, "base_output_path", Path.cwd() / ".test-tmp"),
-            patch.object(main, "export_item_with_integrity", side_effect=slow_export),
-        ):
-            report = main.export_collection_with_integrity(
+        with patch.object(exporter, "export_item_with_integrity", side_effect=slow_export):
+            report = exporter.export_collection_with_integrity(
                 "Concurrent",
                 "https://www.zhihu.com/collection/1",
                 fetch_result=fetch_result,
+                output_root=Path.cwd() / ".test-tmp",
             )
         elapsed = time.monotonic() - started
 
@@ -286,20 +283,17 @@ class ExportPipelineTests(unittest.TestCase):
 
     def test_process_single_collection_routes_to_integrity_pipeline(self):
         report = {"name": "Example Collection", "status": "verified", "items": []}
-        main.processing_log = []
         with patch.object(main, "export_collection_with_integrity", return_value=report) as export:
-            with patch.object(main, "get_article_urls_in_collection", return_value=([], [])):
-                returned = main.process_single_collection(
-                    "Example Collection",
-                    "https://www.zhihu.com/collection/1",
-                )
+            returned = main.process_single_collection(
+                "Example Collection",
+                "https://www.zhihu.com/collection/1",
+            )
         export.assert_called_once_with(
             "Example Collection",
             "https://www.zhihu.com/collection/1",
             mode=ExportMode.BALANCED,
         )
         self.assertIs(returned, report)
-        self.assertEqual(main.processing_log, [report])
 
 if __name__ == "__main__":
     unittest.main()

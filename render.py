@@ -54,7 +54,7 @@ def prefetch_images(image_urls, assets_dir, request_get=None, max_workers=IMAGE_
         url, target_path = pair
         try:
             client = ZhihuClient(
-                transport=request_get, cookies=default_client()._cookies
+                transport=request_get, cookies=default_client().cookies
             ) if request_get else default_client()
             content = client.download(url)
             with open(target_path, 'wb') as fp:

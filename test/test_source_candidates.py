@@ -2,7 +2,7 @@
 import json
 import unittest
 
-import main
+import sources
 from integrity import (
     SourceContentError,
     SourceMetadata,
@@ -28,8 +28,8 @@ class FakeResponse:
 
 class SourceCandidateTests(unittest.TestCase):
     def setUp(self):
-        main._reset_page_candidate_state()
-        self.addCleanup(main._reset_page_candidate_state)
+        sources._reset_page_candidate_state()
+        self.addCleanup(sources._reset_page_candidate_state)
         self.answer_metadata = SourceMetadata(
             "https://www.zhihu.com/question/1/answer/2",
             "answer",
@@ -82,7 +82,7 @@ class SourceCandidateTests(unittest.TestCase):
             '<div class="RichContent-inner"><p>Short visible content.</p></div>'
             f'<script id="js-initialData" type="application/json">{json.dumps(payload)}</script>'
         )
-        candidates = main.parse_answer_page_candidates(self.answer_metadata, html)
+        candidates = sources.parse_answer_page_candidates(self.answer_metadata, html)
         best = choose_best_snapshot(candidates)
         self.assertEqual(best.candidate, "answer_initial_data")
         self.assertEqual(best.metadata.updated_time, 321)
@@ -105,19 +105,19 @@ class SourceCandidateTests(unittest.TestCase):
             '<div class="Post-RichText"><p>Short article.</p></div>'
             f'<script id="js-initialData" type="application/json">{json.dumps(payload)}</script>'
         )
-        best = choose_best_snapshot(main.parse_article_page_candidates(self.article_metadata, html))
+        best = choose_best_snapshot(sources.parse_article_page_candidates(self.article_metadata, html))
         self.assertEqual(best.candidate, "article_initial_data")
         self.assertEqual(best.metadata.updated_time, 456)
 
     def test_login_page_produces_no_article_candidates(self):
         html = "<html><title>登录 - 知乎</title><body>请登录后继续</body></html>"
-        self.assertEqual(main.parse_article_page_candidates(self.article_metadata, html), [])
+        self.assertEqual(sources.parse_article_page_candidates(self.article_metadata, html), [])
 
     def test_fetch_answer_metadata_reads_updated_time(self):
         def request_get(url, **kwargs):
             return FakeResponse(payload={"id": 2, "updated_time": 777})
 
-        metadata = main.fetch_answer_metadata(
+        metadata = sources.fetch_answer_metadata(
             "https://www.zhihu.com/question/1/answer/2",
             request_get=request_get,
         )
@@ -131,8 +131,8 @@ class SourceCandidateTests(unittest.TestCase):
                 return FakeResponse(payload={"content": "<p>Long authenticated API content.</p>"})
             return FakeResponse(text='<div class="RichContent-inner"><p>Short page.</p></div>')
 
-        main._reset_page_candidate_state(eager=True)
-        snapshots = main.fetch_answer_snapshots(
+        sources._reset_page_candidate_state(eager=True)
+        snapshots = sources.fetch_answer_snapshots(
             "https://www.zhihu.com/question/1/answer/2",
             request_get=request_get,
         )
@@ -147,7 +147,7 @@ class SourceCandidateTests(unittest.TestCase):
                 return FakeResponse(payload={"content": "<p>API-only candidate content.</p>"})
             return FakeResponse(text='<div class="RichContent-inner"><p>Page.</p></div>')
 
-        snapshots = main.fetch_answer_snapshots(
+        snapshots = sources.fetch_answer_snapshots(
             "https://www.zhihu.com/question/1/answer/2",
             request_get=request_get,
         )
@@ -164,7 +164,7 @@ class SourceCandidateTests(unittest.TestCase):
                 return FakeResponse(payload={"content": ""})
             return FakeResponse(text='<div class="RichContent-inner"><p>Page fallback.</p></div>')
 
-        snapshots = main.fetch_answer_snapshots(
+        snapshots = sources.fetch_answer_snapshots(
             "https://www.zhihu.com/question/1/answer/2",
             request_get=request_get,
         )
@@ -181,8 +181,8 @@ class SourceCandidateTests(unittest.TestCase):
                 return FakeResponse(payload={"content": "<p>API-only candidate content.</p>"})
             return FakeResponse(text='<div class="RichContent-inner"><p>Page.</p></div>')
 
-        main._reset_page_candidate_state(enabled=False)
-        snapshots = main.fetch_answer_snapshots(
+        sources._reset_page_candidate_state(enabled=False)
+        snapshots = sources.fetch_answer_snapshots(
             "https://www.zhihu.com/question/1/answer/2",
             request_get=request_get,
         )
@@ -191,7 +191,7 @@ class SourceCandidateTests(unittest.TestCase):
         self.assertNotIn("https://www.zhihu.com/question/1/answer/2", requested_urls)
 
     def test_page_candidate_failures_trip_circuit_breaker(self):
-        main._reset_page_candidate_state(failure_limit=3, eager=True)
+        sources._reset_page_candidate_state(failure_limit=3, eager=True)
         page_urls_requested = []
 
         def request_get(url, **kwargs):
@@ -202,15 +202,15 @@ class SourceCandidateTests(unittest.TestCase):
 
         url = "https://www.zhihu.com/question/1/answer/2"
         for _ in range(3):
-            main.fetch_answer_snapshots(url, request_get=request_get)
+            sources.fetch_answer_snapshots(url, request_get=request_get)
 
         self.assertEqual(len(page_urls_requested), 3)
-        snapshots = main.fetch_answer_snapshots(url, request_get=request_get)
+        snapshots = sources.fetch_answer_snapshots(url, request_get=request_get)
         self.assertEqual(len(page_urls_requested), 3)
         self.assertEqual([item.candidate for item in snapshots], ["answer_api"])
 
     def test_page_candidate_failure_counter_resets_on_success(self):
-        main._reset_page_candidate_state(failure_limit=5, eager=True)
+        sources._reset_page_candidate_state(failure_limit=5, eager=True)
         page_urls_requested = []
 
         def request_get(url, **kwargs):
@@ -223,10 +223,10 @@ class SourceCandidateTests(unittest.TestCase):
 
         url = "https://www.zhihu.com/question/1/answer/2"
         for _ in range(6):
-            main.fetch_answer_snapshots(url, request_get=request_get)
+            sources.fetch_answer_snapshots(url, request_get=request_get)
 
         self.assertEqual(len(page_urls_requested), 6)
-        self.assertLess(main._page_candidate_failures, main.PAGE_CANDIDATE_FAILURE_LIMIT)
+        self.assertLess(sources._page_candidate_failures, sources.PAGE_CANDIDATE_FAILURE_LIMIT)
 
 
     def test_fetch_article_metadata_reads_updated_time_from_article_api(self):
@@ -236,7 +236,7 @@ class SourceCandidateTests(unittest.TestCase):
             requested_urls.append(url)
             return FakeResponse(payload={"id": 9, "updated": 888})
 
-        metadata = main.fetch_article_metadata(
+        metadata = sources.fetch_article_metadata(
             "https://zhuanlan.zhihu.com/p/9",
             request_get=request_get,
         )
@@ -249,7 +249,7 @@ class SourceCandidateTests(unittest.TestCase):
         def request_get(url, **kwargs):
             return FakeResponse(status_code=403, payload={"error": {"message": "blocked"}})
 
-        metadata = main.fetch_article_metadata(
+        metadata = sources.fetch_article_metadata(
             "https://zhuanlan.zhihu.com/p/9",
             request_get=request_get,
         )
@@ -271,7 +271,7 @@ class SourceCandidateTests(unittest.TestCase):
                 }
             )
 
-        snapshots = main.fetch_article_snapshots(
+        snapshots = sources.fetch_article_snapshots(
             "https://zhuanlan.zhihu.com/p/9",
             request_get=request_get,
         )
@@ -291,7 +291,7 @@ class SourceCandidateTests(unittest.TestCase):
                 text='<div class="Post-RichText"><p>Fallback page body.</p><p>Fallback ending.</p></div>'
             )
 
-        snapshots = main.fetch_article_snapshots(
+        snapshots = sources.fetch_article_snapshots(
             "https://zhuanlan.zhihu.com/p/9",
             request_get=request_get,
         )
@@ -311,7 +311,7 @@ class SourceCandidateTests(unittest.TestCase):
             '<div class="Footer"><p>Footer navigation repeated repeated repeated repeated.</p></div>'
             '</div>'
         )
-        best = choose_best_snapshot(main.parse_article_page_candidates(self.article_metadata, html))
+        best = choose_best_snapshot(sources.parse_article_page_candidates(self.article_metadata, html))
         self.assertIn("Actual article body", best.html)
         self.assertNotIn("Footer navigation", best.html)
 

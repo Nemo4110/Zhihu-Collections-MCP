@@ -58,7 +58,7 @@ class ZhihuClient:
 
     def __init__(self, transport=None, cookies=None, sleep=time.sleep):
         self._transport = transport or requests.get
-        self._cookies = cookies if cookies is not None else {}
+        self.cookies = cookies if cookies is not None else {}
         self._sleep = sleep
 
     def get_api(self, url, timeout=30):
@@ -66,7 +66,7 @@ class ZhihuClient:
         response = self._transport(
             url=url,
             headers=API_HEADERS,
-            cookies=self._cookies,
+            cookies=self.cookies,
             timeout=timeout,
         )
         response.raise_for_status()
@@ -81,7 +81,7 @@ class ZhihuClient:
         response = self._transport(
             url=url,
             headers=PAGE_HEADERS,
-            cookies=self._cookies,
+            cookies=self.cookies,
             timeout=timeout,
         )
         response.raise_for_status()
@@ -92,7 +92,7 @@ class ZhihuClient:
         response = self._transport(
             url=url,
             headers=PAGE_HEADERS,
-            cookies=self._cookies,
+            cookies=self.cookies,
             timeout=timeout,
         )
         response.raise_for_status()
@@ -106,7 +106,7 @@ class ZhihuClient:
                 response = self._transport(
                     url=url,
                     headers=PAGE_HEADERS,
-                    cookies=self._cookies,
+                    cookies=self.cookies,
                     timeout=timeout,
                 )
                 response.raise_for_status()
