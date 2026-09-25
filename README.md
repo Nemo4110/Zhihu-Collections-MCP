@@ -231,6 +231,17 @@ python main.py --force
 
 重新下载全部支持的回答和专栏，采用临时文件、`fsync` 和原子替换写入，避免中断时破坏上一份有效 Markdown。
 
+### 远端删除同步（归档）
+
+工具采用“只增不删”的本地模型，远端删除不会直接丢弃本地文件，而是归档：
+
+- **收藏夹被删除**：两种判定信号。其一，收藏夹 API 第一页即返回 404 且从未取到任何数据；其二，分页返回空列表（知乎对已删除夹子的 items API 仍返回 200 + totals=0），此时再请求元信息 API `/api/v4/collections/{id}`，返回 404 判为已删除，返回 200 则是新建空夹，其他错误不判定（网络错误、5xx、分页中途失败都不会误判）。命中时整个收藏夹目录（含 Markdown、图片与 `.zhihu-integrity.json`）移动到输出目录下的 `.archived.collections/<收藏夹名>/`，同名冲突自动加序号后缀；收藏夹状态记为 `collection_archived`，不算失败（退出码 0），并回写 `config.json` 标记 `status: archived`，下次运行直接跳过。重跑 `python fetch_collections.py` 重建列表可清除标记。
+- **条目被移出收藏夹（如手动取消收藏）**：仅在收藏夹分页完整时执行。完整性清单中已不在本轮收藏夹列表里的条目，其 Markdown 与引用的图片会移动到 `.archived.items/<收藏夹名>/`（保持 `md + assets/` 相对结构，链接继续有效），清单记录同步移除；被其余保留条目共享的图片复制而非移动。每次归档都会追加到该归档目录的 `.archived-manifest.json`。
+- **内容获取不到**（条目仍在列表中但正文已删/被隐藏）：仍按原有逻辑处理，正文抓取失败记 `source_failed`（退出码 1），或仅总数对不上时记 `total_mismatch`（`verified_with_warnings`）。
+- **total_mismatch 时延迟归档**：分页对账不上的收藏夹（隐藏/失效条目仍计入 totals）中，疑似移出的条目本轮不归档也不报告，因为无法区分「用户取消收藏」与「暂时不可见」，待 totals 恢复一致后的下一次运行再同步。
+- 收藏夹 API 返回 404 时不再重试退避（确定性失败），已删除收藏夹不会拖慢每次运行。
+- `--audit` 严格只读模式下不动任何文件，只在报告中列出 `archivable_items` 供人工确认。
+
 ### 完整性报告
 
 每次运行都会在输出目录生成：
@@ -272,6 +283,13 @@ python main.py --audit
 │       ├── image1.jpg
 │       └── image2.png
 ├── 收藏夹名称2/
+├── .archived.collections/   # 远端已删除收藏夹的归档目录
+│   └── 收藏夹名称3/         # 整目录移入，含 md、assets 与清单
+├── .archived.items/         # 被移出收藏夹条目的归档目录
+│   └── 收藏夹名称1/
+│       ├── 文章3.md
+│       ├── .archived-manifest.json
+│       └── assets/
 ├── logs/
 │   ├── debug_20240101_120000.log
 │   └── 20240101_120000.json

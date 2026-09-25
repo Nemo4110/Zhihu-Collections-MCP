@@ -79,6 +79,8 @@ python main.py --page-candidates
 
 导出为项级并发（`ITEM_EXPORT_WORKERS`，默认 3），清单读写通过 `_manifest_lock` 互斥并在每项完成后落盘；图片在渲染前按 URL 并发预取（`IMAGE_PREFETCH_WORKERS`，默认 4，公式 URL 转公式不下载），本地已有同名非空资源（zhimg URL 含内容 hash）时直接复用不再请求。
 
+远端删除同步采用归档而非删除本地文件：收藏夹已删除时判定 `not_found`（第一页即 404 且从未取到数据，或分页空列表但元信息 API `/api/v4/collections/{id}` 确认 404——知乎对已删除夹子的 items API 仍返回 200+空；网络错误/5xx/分页中途失败/元信息非 404 均不误判，404 不重试退避），整个收藏夹目录移入输出根的 `.archived.collections/<收藏夹名>/`，状态 `collection_archived` 不计入退出码（cli 汇总打印归档数并回写 config.json 的 `status: archived` 标记，下次运行跳过这些夹子）；分页完整且对账一致时，清单中已不在收藏夹列表的条目（如手动取消收藏）其 Markdown 与图片移入 `.archived.items/<收藏夹名>/`（共享图片复制而非移动），清单记录同步移除，归档历史经 `integrity.append_archived_items_manifest` 写入该目录的 `.archived-manifest.json`；存在 `total_mismatch` 时本轮不归档（无法区分取消收藏与隐藏）；`--audit` 只读模式不动文件仅报告 `archivable_items`；条目仍在列表但正文取不到时仍按 `source_failed`/`total_mismatch` 原有逻辑处理。
+
 隔离 worktree 可通过 `ZHIHU_COOKIES_FILE` 引用主检出中被忽略的 Cookie 文件，禁止将 Cookie 内容写入代码、测试、日志或 Git。
 
 ### 配置和运行
