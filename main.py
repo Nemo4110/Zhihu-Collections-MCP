@@ -13,6 +13,7 @@ from datetime import datetime
 from dataclasses import replace
 from utils import filter_title_str
 from paths_config import get_current_os, load_config, load_cookies, parse_output_path
+from zhihu_client import ZhihuClient
 import json
 import logging
 import traceback
@@ -204,59 +205,22 @@ debug_log_file = setup_debug_logging()
 
 cookies = load_cookies()
 
-# 页面请求的 headers
-headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-    "Connection": "keep-alive",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6,zh-TW;q=0.5",
-    "Accept-Encoding": "gzip, deflate",
-    "Referer": "https://www.zhihu.com/",
-    "sec-ch-ua": "\"Microsoft Edge\";v=\"147\", \"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"147\"",
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": "\"Windows\"",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "same-site",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1"
-}
 
-# API 请求的 headers（用于获取回答内容）
-api_headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-    "Accept": "*/*",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    "Referer": "https://www.zhihu.com/",
-    "x-requested-with": "fetch",
-    "sec-ch-ua": "\"Microsoft Edge\";v=\"147\", \"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"147\"",
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": "\"Windows\"",
-}
-
-def _download_image_content(src, request_get=None, sleep=None, attempts=3):
-    request_get = request_get or requests.get
-    sleep = sleep or time.sleep
-    last_error = None
-    for attempt in range(attempts):
-        try:
-            response = request_get(
-                url=src,
-                headers=headers,
-                cookies=cookies,
-                timeout=30,
-            )
-            response.raise_for_status()
-            return response.content
-        except requests.RequestException as exc:
-            last_error = exc
-            if attempt + 1 < attempts:
-                sleep(attempt + 1)
-    raise last_error
-
+def _client(request_get=None, sleep=None):
+    """按调用点的注入构造客户端；默认用真实 requests 与全局 cookies。"""
+    return ZhihuClient(
+        transport=request_get or requests.get,
+        cookies=cookies,
+        sleep=sleep or time.sleep,
+    )
 
 # 图片预取并发数：zhimg CDN 限流宽松，但与项级并发（3）叠加时控制峰值请求数
 IMAGE_PREFETCH_WORKERS = 4
+
+def _download_image_content(src, request_get=None, sleep=None, attempts=3):
+    """下载图片内容；重试/退避由 ZhihuClient.download 持有。"""
+    client = _client(request_get, sleep)
+    return client.download(src, attempts=attempts)
 
 
 def _asset_file_ready(path):
@@ -486,14 +450,7 @@ def get_article_nums_of_collection(
     last_error = None
     for attempt in range(attempts):
         try:
-            response = request_get(
-                collection_url,
-                headers=headers,
-                cookies=cookies,
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            payload = response.json()
+            payload = _client(request_get, sleep).get_page_data(collection_url, timeout=timeout)
             total = payload["paging"]["totals"]
             logging.info(f"收藏夹 {collection_id} 包含 {total} 个项目")
             return int(total)
@@ -545,14 +502,7 @@ def fetch_collection_items(
                 logging.info(
                     f"请求收藏夹API: offset={offset}, limit={limit}, attempt={attempt + 1}"
                 )
-                response = request_get(
-                    collection_url,
-                    headers=headers,
-                    cookies=cookies,
-                    timeout=timeout,
-                )
-                response.raise_for_status()
-                payload = response.json()
+                payload = _client(request_get, sleep).get_page_data(collection_url, timeout=timeout)
                 if not isinstance(payload, dict) or not isinstance(payload.get('data'), list):
                     raise ValueError("收藏夹API响应缺少data数组")
                 break
@@ -743,14 +693,9 @@ def fetch_answer_metadata(answer_url, request_get=None):
     request_get = request_get or requests.get
     canonical_url = canonicalize_url(answer_url)
     source_type, answer_id = parse_source_identity(canonical_url)
-    response = request_get(
-        f"https://www.zhihu.com/api/v4/answers/{answer_id}?include=updated_time",
-        headers=api_headers,
-        cookies=cookies,
-        timeout=30,
+    payload = _client(request_get).get_api(
+        f"https://www.zhihu.com/api/v4/answers/{answer_id}?include=updated_time"
     )
-    response.raise_for_status()
-    payload = response.json()
     return SourceMetadata(
         canonical_url=canonical_url,
         source_type=source_type,
@@ -808,14 +753,9 @@ def fetch_answer_snapshots(answer_url, request_get=None):
     candidates = []
     api_candidate_ok = False
     try:
-        api_response = request_get(
-            f"https://www.zhihu.com/api/v4/answers/{answer_id}?include=content,updated_time",
-            headers=api_headers,
-            cookies=cookies,
-            timeout=30,
+        payload = _client(request_get).get_api(
+            f"https://www.zhihu.com/api/v4/answers/{answer_id}?include=content,updated_time"
         )
-        api_response.raise_for_status()
-        payload = api_response.json()
         if isinstance(payload.get("content"), str) and payload["content"]:
             api_metadata = replace(
                 metadata,
@@ -831,14 +771,8 @@ def fetch_answer_snapshots(answer_url, request_get=None):
     # 仅当 API 候选缺失/失败，或显式开启急切模式（--page-candidates）时才尝试网页。
     if _page_candidates_available() and (not api_candidate_ok or PAGE_CANDIDATES_EAGER):
         try:
-            page_response = request_get(
-                canonical_url,
-                headers=headers,
-                cookies=cookies,
-                timeout=30,
-            )
-            page_response.raise_for_status()
-            candidates.extend(parse_answer_page_candidates(metadata, page_response.text))
+            page_html = _client(request_get).get_page(canonical_url)
+            candidates.extend(parse_answer_page_candidates(metadata, page_html))
             _record_page_candidate_success()
         except Exception as exc:
             logging.warning(f"回答网页候选获取失败: {canonical_url}: {exc}")
@@ -867,18 +801,12 @@ def fetch_article_metadata(article_url, request_get=None):
     canonical_url = canonicalize_url(article_url)
     source_type, article_id = parse_source_identity(canonical_url)
     try:
-        response = request_get(
-            _article_api_url(article_id),
-            headers=api_headers,
-            cookies=cookies,
-            timeout=30,
-        )
-        response.raise_for_status()
+        payload = _client(request_get).get_api(_article_api_url(article_id))
         return _article_metadata_from_payload(
             canonical_url,
             source_type,
             article_id,
-            response.json(),
+            payload,
         )
     except Exception as exc:
         logging.warning(f"专栏元数据API获取失败，继续抓取正文: {canonical_url}: {exc}")
@@ -892,14 +820,7 @@ def fetch_article_snapshots(article_url, request_get=None):
     metadata = SourceMetadata(canonical_url, source_type, article_id, None)
 
     try:
-        api_response = request_get(
-            _article_api_url(article_id),
-            headers=api_headers,
-            cookies=cookies,
-            timeout=30,
-        )
-        api_response.raise_for_status()
-        payload = api_response.json()
+        payload = _client(request_get).get_api(_article_api_url(article_id))
         content = payload.get("content")
         if isinstance(content, str) and content.strip():
             api_metadata = _article_metadata_from_payload(
@@ -913,14 +834,8 @@ def fetch_article_snapshots(article_url, request_get=None):
     except Exception as exc:
         logging.warning(f"专栏API候选获取失败，尝试网页候选: {canonical_url}: {exc}")
 
-    response = request_get(
-        canonical_url,
-        headers=headers,
-        cookies=cookies,
-        timeout=30,
-    )
-    response.raise_for_status()
-    return parse_article_page_candidates(metadata, response.text)
+    page_html = _client(request_get).get_page(canonical_url)
+    return parse_article_page_candidates(metadata, page_html)
 
 
 def fetch_source_snapshot(url, request_get=None):
