@@ -10,11 +10,11 @@ import time
 import random
 import logging
 from datetime import datetime
-import pathlib
-import platform
 
 # 收藏夹列表 API 的公共请求头和分页大小
-from paths_config import get_current_os, load_config, load_cookies, parse_output_path
+from paths_config import load_config, load_cookies
+from cli import setup_logging
+from exporter import DEFAULT_OUTPUT_ROOT
 
 API_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -24,30 +24,6 @@ API_HEADERS = {
     "Referer": "https://www.zhihu.com/collections/mine",
 }
 COLLECTIONS_PAGE_LIMIT = 20
-
-
-def setup_logging():
-    """设置日志"""
-    # 获取日志目录
-    logs_dir = os.path.join(os.path.dirname(__file__), 'downloads', 'logs')
-    if not os.path.exists(logs_dir):
-        os.makedirs(logs_dir)
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = f"openCollection_{timestamp}.log"
-    log_path = os.path.join(logs_dir, log_filename)
-    
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_path, encoding='utf-8'),
-            logging.StreamHandler()
-        ],
-        force=True
-    )
-    
-    return log_path
 
 
 def get_url_token(cookies=None):
@@ -223,8 +199,8 @@ def main():
     print("知乎收藏夹获取工具")
     print("=" * 60)
     
-    # 设置日志
-    log_path = setup_logging()
+    # 设置日志（与主 CLI 同一套日志装配）
+    log_path = setup_logging(DEFAULT_OUTPUT_ROOT / "logs")
     logging.info("开始执行收藏夹获取任务")
     print(f"日志文件: {log_path}")
     

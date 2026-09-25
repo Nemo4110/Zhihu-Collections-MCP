@@ -1,6 +1,6 @@
 # 测试目录
 
-测试按**接缝**（公共接口）组织，全部为 unittest 测试：
+测试按接缝（公共接口）组织，全部为 unittest 测试：
 
 ```
 .venv/Scripts/python -m unittest discover -s test -p "test_*.py"

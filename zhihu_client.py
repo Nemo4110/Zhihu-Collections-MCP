@@ -2,9 +2,9 @@
 """知乎 HTTP 客户端：系统边界适配器。
 
 接缝说明：ZhihuClient 把"传输 + 认证头 + Cookie + 重试/退避"收进一个
-小接口（get_api / get_page / download），生产环境用 requests 传输，
-测试注入假传输。页面请求与 API 请求的头部差异是知乎的反爬语义，
-由本模块统一持有，调用方不再感知 headers。
+小接口（get_api / get_page / get_page_data / download），生产环境用
+requests 传输，测试注入假传输。页面请求与 API 请求的头部差异是
+知乎的反爬语义，由本模块统一持有，调用方无需处理头部。
 """
 import time
 

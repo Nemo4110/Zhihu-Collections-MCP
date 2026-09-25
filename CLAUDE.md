@@ -14,12 +14,12 @@ Export-Zhihu-Collections 是一个将知乎收藏夹导出为 Markdown 格式的
 
 ### 主要架构（深模块分层）
 - **cli.py**: 命令行装配层（参数解析、配置加载、日志装配、输出根解析），导入零副作用
-- **exporter.py**: 导出引擎深模块——`export_item_with_integrity()`（单项 verify/adopt/repair/refresh）、`export_collection_with_integrity()`（收藏夹级并发导出 + 清单落盘，`output_root` 显式注入）、`determine_exit_code()`、`save_integrity_report()`
-- **sources.py**: 知乎源数据抓取层——`fetch_collection_items()`（分页对账）、`fetch_answer_snapshots()` / `fetch_article_snapshots()`（API/网页双候选）、`fetch_source_snapshot()`、网页候选熔断状态
-- **render.py**: 渲染模块——`Renderer` / `render_markdown()`（快照 HTML → Obsidian Markdown，公式转 LaTeX）、`prefetch_images()`（并发预取）；assets_dir 与 client 显式注入，无全局状态
-- **zhihu_client.py**: 知乎 HTTP 边界适配器——`ZhihuClient`（`get_api` / `get_page` / `get_page_data` / `download`）持有头部策略与重试退避；`default_client()` 情性加载一次 Cookie
+- **exporter.py**: 导出引擎深模块：`export_item_with_integrity()`（单项 verify/adopt/repair/refresh）、`export_collection_with_integrity()`（收藏夹级并发导出 + 清单落盘，`output_root` 显式注入）、`determine_exit_code()`、`save_integrity_report()`
+- **sources.py**: 知乎源数据抓取层：`fetch_collection_items()`（分页对账）、`fetch_answer_snapshots()` / `fetch_article_snapshots()`（API/网页双候选）、`fetch_source_snapshot()`、网页候选熔断状态
+- **render.py**: 渲染模块：`Renderer` / `render_markdown()`（快照 HTML → Obsidian Markdown，公式转 LaTeX）、`prefetch_images()`（并发预取）；assets_dir 与 client 显式注入，无全局状态
+- **zhihu_client.py**: 知乎 HTTP 边界适配器：`ZhihuClient`（`get_api` / `get_page` / `get_page_data` / `download`）持有头部策略与重试退避；`default_client()` 情性加载一次 Cookie
 - **integrity.py**: 导出完整性核心模块（纯逻辑），负责规范 URL、源内容/Markdown 哈希、公式与图片的对称文本归一化、分段相似度覆盖率、警告分级、图片清单、原子写入、完整性清单、刷新策略和运行报告
-- **paths_config.py**: 配置与跨平台路径模块——`load_config()` / `parse_output_path()` / `load_cookies()` / `get_current_os()`，路径参数可注入
+- **paths_config.py**: 配置与跨平台路径模块：`load_config()` / `parse_output_path()` / `load_cookies()` / `get_current_os()`，路径参数可注入
 - **main.py**: 向后兼容的 CLI 入口 shim（`python main.py` 用法不变）
 - **fetch_collections.py**: 独立的收藏夹获取脚本（复用 paths_config）
 - **mcp_server.py**: MCP 服务，直接接 exporter/sources 深模块接口（导出走完整性管线）

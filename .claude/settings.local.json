@@ -11,5 +11,8 @@
       "Bash(mv:*)"
     ],
     "deny": []
-  }
+  },
+  "disabledMcpjsonServers": [
+    "zotero"
+  ]
 }

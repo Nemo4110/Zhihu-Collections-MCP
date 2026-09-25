@@ -1,6 +1,141 @@
 {
   "zhihuUrls": [
-    { "name": "推荐系统", "url": "https://www.zhihu.com/collection/981188948" }
+    {
+      "name": "默认收藏夹（待分类）",
+      "url": "https://www.zhihu.com/collection/694596764"
+    },
+    {
+      "name": "推荐系统",
+      "url": "https://www.zhihu.com/collection/981188948"
+    },
+    {
+      "name": "NLP x LLM",
+      "url": "https://www.zhihu.com/collection/981189658"
+    },
+    {
+      "name": "在北京",
+      "url": "https://www.zhihu.com/collection/863875250"
+    },
+    {
+      "name": "计算机相关",
+      "url": "https://www.zhihu.com/collection/616539047"
+    },
+    {
+      "name": "Python",
+      "url": "https://www.zhihu.com/collection/864859783"
+    },
+    {
+      "name": "职业生涯",
+      "url": "https://www.zhihu.com/collection/1004255603"
+    },
+    {
+      "name": "AGENTS",
+      "url": "https://www.zhihu.com/collection/998652246"
+    },
+    {
+      "name": "深度学习",
+      "url": "https://www.zhihu.com/collection/795173908"
+    },
+    {
+      "name": "投资",
+      "url": "https://www.zhihu.com/collection/1001588083"
+    },
+    {
+      "name": "数学相关",
+      "url": "https://www.zhihu.com/collection/795173740"
+    },
+    {
+      "name": "Pytorch",
+      "url": "https://www.zhihu.com/collection/847111575"
+    },
+    {
+      "name": "论文阅读",
+      "url": "https://www.zhihu.com/collection/795178511"
+    },
+    {
+      "name": "论文撰写",
+      "url": "https://www.zhihu.com/collection/796852237"
+    },
+    {
+      "name": "深度学习tool",
+      "url": "https://www.zhihu.com/collection/847113560"
+    },
+    {
+      "name": "人生各个阶段用得到的",
+      "url": "https://www.zhihu.com/collection/178765338"
+    },
+    {
+      "name": "面经八股",
+      "url": "https://www.zhihu.com/collection/981189191"
+    },
+    {
+      "name": "实用小技巧/工具",
+      "url": "https://www.zhihu.com/collection/521382220"
+    },
+    {
+      "name": "技能/知识/课程路线图",
+      "url": "https://www.zhihu.com/collection/830320359"
+    },
+    {
+      "name": "信息获取",
+      "url": "https://www.zhihu.com/collection/811484248"
+    },
+    {
+      "name": "机器学习",
+      "url": "https://www.zhihu.com/collection/847110366"
+    },
+    {
+      "name": "计算机视觉CV",
+      "url": "https://www.zhihu.com/collection/867279325"
+    },
+    {
+      "name": "深度学习trick",
+      "url": "https://www.zhihu.com/collection/847112870"
+    },
+    {
+      "name": "GITHUB",
+      "url": "https://www.zhihu.com/collection/795173774"
+    },
+    {
+      "name": "论文工具",
+      "url": "https://www.zhihu.com/collection/811486648"
+    },
+    {
+      "name": "深度学习前沿",
+      "url": "https://www.zhihu.com/collection/867279464"
+    },
+    {
+      "name": "研究生相关",
+      "url": "https://www.zhihu.com/collection/797653155"
+    },
+    {
+      "name": "沟通交际",
+      "url": "https://www.zhihu.com/collection/174552553"
+    },
+    {
+      "name": "LaTeX",
+      "url": "https://www.zhihu.com/collection/797723472"
+    },
+    {
+      "name": "C/C++",
+      "url": "https://www.zhihu.com/collection/795174751"
+    },
+    {
+      "name": "烹饪",
+      "url": "https://www.zhihu.com/collection/811491485"
+    },
+    {
+      "name": "社科人文",
+      "url": "https://www.zhihu.com/collection/811489859"
+    },
+    {
+      "name": "考研",
+      "url": "https://www.zhihu.com/collection/497173158"
+    },
+    {
+      "name": "健身锻炼",
+      "url": "https://www.zhihu.com/collection/811493464"
+    }
   ],
   "outputPath": "C:/Users/041/OneDrive/Projects/Zhihu-Collections-MCP/output",
   "os": "windows",

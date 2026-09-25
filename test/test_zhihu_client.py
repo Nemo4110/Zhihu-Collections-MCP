@@ -107,7 +107,7 @@ class GetPageTests(unittest.TestCase):
 
 class GetPageDataTests(unittest.TestCase):
     def test_parses_json_with_page_style_headers(self):
-        """收藏夹分页接口走页面风格头部（无 x-requested-with），行为与旧代码一致。"""
+        """收藏夹分页接口用页面风格头部（无 x-requested-with）。"""
         transport = RecordingTransport(
             [("https://www.zhihu.com/api/v4/collections/", FakeResponse(payload={"data": []}))]
         )

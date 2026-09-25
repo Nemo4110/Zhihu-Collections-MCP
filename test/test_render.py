@@ -2,7 +2,7 @@
 """render 接缝的行为测试：快照 HTML → Obsidian Markdown。
 
 接缝说明：render 模块是纯转换 + 本地资产获取（图片落盘/复用/降级），
-不感知收藏夹名称或全局输出路径；网络只通过注入的 client.download。
+网络只通过注入的 client.download。
 """
 import shutil
 import unittest

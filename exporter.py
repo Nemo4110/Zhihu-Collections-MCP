@@ -1,10 +1,9 @@
 # -*- coding:utf-8 -*-
 """导出引擎：项级 verify/adopt/repair/refresh + 完整性清单 + 运行报告。
 
-接缝说明：exporter 是本项目的核心深模块——给定收藏夹与输出根目录，
-产出 Markdown 文件、assets、.zhihu-integrity.json 与逐项报告。
-网络经注入的 fetch/render 函数；磁盘位置经显式 output_root 参数，
-不依赖任何全局路径状态。
+接缝说明：给定收藏夹与输出根目录，产出 Markdown 文件、assets、
+.zhihu-integrity.json 与逐项报告。网络经注入的 fetch/render 函数，
+磁盘位置由 output_root 参数传入。
 """
 import logging
 import os

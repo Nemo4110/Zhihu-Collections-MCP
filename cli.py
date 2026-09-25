@@ -1,9 +1,9 @@
 # -*- coding:utf-8 -*-
 """命令行装配层：参数 → 配置 → 输出根目录 → 导出引擎。
 
-接缝说明：cli 只做装配，不含业务逻辑。导入本模块无任何副作用
-（不配日志、不读文件）；所有装配发生在 main() 内。网页候选开关
-经 sources._reset_page_candidate_state 传播，不使用跨模块全局赋值。
+接缝说明：cli 只做装配。导入本模块无任何副作用（不配日志、不读
+文件），所有装配发生在 main() 内。网页候选开关经
+sources._reset_page_candidate_state 传播。
 """
 import argparse
 import logging

@@ -1,9 +1,9 @@
 # -*- coding:utf-8 -*-
 """渲染模块：快照 HTML → Obsidian 风格 Markdown + 本地图片资产。
 
-接缝说明：render 不感知收藏夹名称、输出根路径等任何全局状态；
-网络访问只通过注入的 client（ZhihuClient 或测试假件），资产写入
-显式的 assets_dir。图片复用/死链降级/公式转 LaTeX 都藏在本模块内。
+接缝说明：网络访问只通过注入的 client（ZhihuClient 或测试假件），
+资产写入显式的 assets_dir。图片复用、死链降级、公式转 LaTeX 都
+在本模块内。
 """
 import logging
 import os
@@ -114,7 +114,7 @@ class ObsidianStyleConverter(MarkdownConverter):
                 logging.debug(f"convert_img returning equation: {result}")
                 return result
 
-            # 资产目录由 Renderer 显式注入，不再依赖全局收藏夹名称
+            # 资产目录由 Renderer 显式注入
             assetsDir = self.options['assets_dir']
             if not os.path.exists(assetsDir):
                 os.makedirs(assetsDir, exist_ok=True)
