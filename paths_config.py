@@ -10,6 +10,9 @@ import logging
 import os
 import pathlib
 import platform
+from datetime import datetime
+
+from integrity import atomic_write_json
 
 
 def get_current_os():
@@ -88,6 +91,39 @@ def load_config(config_file='config.json', legacy_file='zhihuUrls.json'):
         except FileNotFoundError:
             print("未找到配置文件，请创建config.json文件并配置收藏夹信息")
             return {"zhihuUrls": [], "outputPath": "", "os": ""}
+
+
+# 收藏夹条目中标记「远端已删除」的状态字段名
+COLLECTION_STATUS_FIELD = "status"
+COLLECTION_ARCHIVED_STATUS = "archived"
+
+
+def mark_collections_archived(config_file, urls, archived_at=None):
+    """把指定 URL 的收藏夹在 config.json 中标记为 archived 并原子写回。
+
+    已有标记的条目保留原 archivedAt（记录首次检测到删除的时间）；
+    其余字段（name/outputPath/os 等）原样保留。urls 为空时不动文件。
+    """
+    if not urls:
+        return False
+    with open(config_file, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+    target_urls = set(urls)
+    changed = False
+    timestamp = archived_at or datetime.now().astimezone().isoformat(timespec="seconds")
+    for entry in config.get('zhihuUrls', []):
+        if not isinstance(entry, dict) or entry.get('url') not in target_urls:
+            continue
+        if entry.get(COLLECTION_STATUS_FIELD) == COLLECTION_ARCHIVED_STATUS:
+            continue
+        entry[COLLECTION_STATUS_FIELD] = COLLECTION_ARCHIVED_STATUS
+        entry['archivedAt'] = timestamp
+        changed = True
+    if not changed:
+        return False
+    atomic_write_json(config_file, config)
+    logging.info(f"已在 {config_file} 标记 {len(target_urls)} 个已删除收藏夹")
+    return True
 
 
 def load_cookies(cookie_file=None):

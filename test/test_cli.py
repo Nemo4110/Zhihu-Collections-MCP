@@ -6,6 +6,7 @@
 目录用临时工作区。导入无副作用用子进程验证（不受套件内其他
 模块的导入污染）。
 """
+import io
 import json
 import os
 import shutil
@@ -13,13 +14,14 @@ import subprocess
 import sys
 import unittest
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 import cli
 import sources
 from integrity import ExportMode
+from paths_config import mark_collections_archived
 
 
 @contextmanager
@@ -39,6 +41,16 @@ VERIFIED_REPORT = {
     "url": "https://www.zhihu.com/collection/1",
     "status": "verified",
     "collection": {"complete": True, "unsupported_items": []},
+    "items": [],
+}
+
+
+ARCHIVED_REPORT = {
+    "name": "收藏",
+    "url": "https://www.zhihu.com/collection/1",
+    "status": "collection_archived",
+    "archive_path": None,
+    "collection": {"complete": False, "unsupported_items": []},
     "items": [],
 }
 
@@ -157,6 +169,123 @@ class AssemblyTests(unittest.TestCase):
                 self.assertEqual(kwargs["mode"], ExportMode.BALANCED)
             finally:
                 os.chdir(cwd)
+
+
+class ArchiveSummaryTests(unittest.TestCase):
+    def test_archived_collections_are_summarized_and_exit_zero(self):
+        """远端删除导致的归档要在汇总里可见，且不产生失败退出码。"""
+        with workspace_directory() as directory:
+            write_config(directory)
+            cwd = os.getcwd()
+            os.chdir(directory)
+            try:
+                with patch.object(
+                    cli, "export_collection_with_integrity", return_value=dict(ARCHIVED_REPORT)
+                ):
+                    with patch.object(cli, "save_integrity_report") as save:
+                        save.return_value = Path("x") / "integrity.json"
+                        buffer = io.StringIO()
+                        with redirect_stdout(buffer):
+                            code = cli.main([])
+                self.assertIn("已归档收藏夹（远端已删除）: 1", buffer.getvalue())
+                self.assertEqual(code, 0)
+                # 新归档的收藏夹被回写标记到 config.json
+                config = json.loads((directory / "config.json").read_text(encoding="utf-8"))
+                entry = config["zhihuUrls"][0]
+                self.assertEqual(entry["status"], "archived")
+                self.assertIn("archivedAt", entry)
+            finally:
+                os.chdir(cwd)
+
+    def test_marked_collections_are_skipped_without_requests(self):
+        """config 已标记 archived 的收藏夹不发请求，报告记 archived_skipped。"""
+        with workspace_directory() as directory:
+            write_config(directory, collections=[
+                {"name": "已删夹", "url": "https://www.zhihu.com/collection/1",
+                 "status": "archived", "archivedAt": "2025-01-01T00:00:00+08:00"},
+            ])
+            cwd = os.getcwd()
+            os.chdir(directory)
+            try:
+                with patch.object(cli, "export_collection_with_integrity") as exporter:
+                    with patch.object(cli, "save_integrity_report") as save:
+                        save.return_value = Path("x") / "integrity.json"
+                        buffer = io.StringIO()
+                        with redirect_stdout(buffer):
+                            code = cli.main([])
+                exporter.assert_not_called()
+                self.assertIn("跳过已归档收藏夹（config 已标记）: 1", buffer.getvalue())
+                self.assertEqual(code, 0)
+            finally:
+                os.chdir(cwd)
+
+    def test_summary_without_archives_stays_quiet(self):
+        with workspace_directory() as directory:
+            write_config(directory)
+            cwd = os.getcwd()
+            os.chdir(directory)
+            try:
+                with patch.object(
+                    cli, "export_collection_with_integrity", return_value=dict(VERIFIED_REPORT)
+                ):
+                    with patch.object(cli, "save_integrity_report") as save:
+                        save.return_value = Path("x") / "integrity.json"
+                        buffer = io.StringIO()
+                        with redirect_stdout(buffer):
+                            code = cli.main([])
+                self.assertNotIn("已归档收藏夹", buffer.getvalue())
+                self.assertEqual(code, 0)
+            finally:
+                os.chdir(cwd)
+
+
+class MarkCollectionsArchivedTests(unittest.TestCase):
+    def _write(self, directory, entries):
+        config = {"zhihuUrls": entries, "outputPath": "", "os": ""}
+        (directory / "config.json").write_text(
+            json.dumps(config, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def test_marks_entries_and_preserves_other_fields(self):
+        with workspace_directory() as directory:
+            self._write(directory, [
+                {"name": "甲", "url": "https://www.zhihu.com/collection/1"},
+                {"name": "乙", "url": "https://www.zhihu.com/collection/2"},
+            ])
+            changed = mark_collections_archived(
+                directory / "config.json",
+                ["https://www.zhihu.com/collection/1"],
+                archived_at="2025-06-01T10:00:00+08:00",
+            )
+            self.assertTrue(changed)
+            config = json.loads((directory / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["zhihuUrls"][0]["status"], "archived")
+            self.assertEqual(config["zhihuUrls"][0]["archivedAt"], "2025-06-01T10:00:00+08:00")
+            self.assertNotIn("status", config["zhihuUrls"][1])
+            # 其余配置字段原样保留
+            self.assertEqual(config["outputPath"], "")
+
+    def test_existing_marks_keep_first_timestamp(self):
+        with workspace_directory() as directory:
+            self._write(directory, [{
+                "name": "甲", "url": "https://www.zhihu.com/collection/1",
+                "status": "archived", "archivedAt": "2025-01-01T00:00:00+08:00",
+            }])
+            changed = mark_collections_archived(
+                directory / "config.json",
+                ["https://www.zhihu.com/collection/1"],
+                archived_at="2025-06-01T10:00:00+08:00",
+            )
+            self.assertFalse(changed)
+            config = json.loads((directory / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                config["zhihuUrls"][0]["archivedAt"], "2025-01-01T00:00:00+08:00"
+            )
+
+    def test_empty_urls_is_noop(self):
+        with workspace_directory() as directory:
+            self._write(directory, [{"name": "甲", "url": "https://www.zhihu.com/collection/1"}])
+            self.assertFalse(mark_collections_archived(directory / "config.json", []))
 
 
 if __name__ == "__main__":

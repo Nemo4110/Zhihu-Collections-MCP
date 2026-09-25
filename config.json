@@ -1,4 +1,7 @@
 {
+  "openCollection": false,
+  "os": "windows",
+  "outputPath": "C:/Users/041/OneDrive/Projects/Zhihu-Collections-MCP/output",
   "zhihuUrls": [
     {
       "name": "默认收藏夹（待分类）",
@@ -45,7 +48,9 @@
       "url": "https://www.zhihu.com/collection/795173740"
     },
     {
+      "archivedAt": "2026-09-26T02:57:08+08:00",
       "name": "Pytorch",
+      "status": "archived",
       "url": "https://www.zhihu.com/collection/847111575"
     },
     {
@@ -57,7 +62,9 @@
       "url": "https://www.zhihu.com/collection/796852237"
     },
     {
+      "archivedAt": "2026-09-26T02:57:08+08:00",
       "name": "深度学习tool",
+      "status": "archived",
       "url": "https://www.zhihu.com/collection/847113560"
     },
     {
@@ -65,7 +72,9 @@
       "url": "https://www.zhihu.com/collection/178765338"
     },
     {
+      "archivedAt": "2026-09-26T02:57:08+08:00",
       "name": "面经八股",
+      "status": "archived",
       "url": "https://www.zhihu.com/collection/981189191"
     },
     {
@@ -85,23 +94,33 @@
       "url": "https://www.zhihu.com/collection/847110366"
     },
     {
+      "archivedAt": "2026-09-26T02:57:08+08:00",
       "name": "计算机视觉CV",
+      "status": "archived",
       "url": "https://www.zhihu.com/collection/867279325"
     },
     {
+      "archivedAt": "2026-09-26T02:57:08+08:00",
       "name": "深度学习trick",
+      "status": "archived",
       "url": "https://www.zhihu.com/collection/847112870"
     },
     {
+      "archivedAt": "2026-09-26T02:57:08+08:00",
       "name": "GITHUB",
+      "status": "archived",
       "url": "https://www.zhihu.com/collection/795173774"
     },
     {
+      "archivedAt": "2026-09-26T02:57:08+08:00",
       "name": "论文工具",
+      "status": "archived",
       "url": "https://www.zhihu.com/collection/811486648"
     },
     {
+      "archivedAt": "2026-09-26T02:57:08+08:00",
       "name": "深度学习前沿",
+      "status": "archived",
       "url": "https://www.zhihu.com/collection/867279464"
     },
     {
@@ -121,7 +140,9 @@
       "url": "https://www.zhihu.com/collection/795174751"
     },
     {
+      "archivedAt": "2026-09-26T02:57:08+08:00",
       "name": "烹饪",
+      "status": "archived",
       "url": "https://www.zhihu.com/collection/811491485"
     },
     {
@@ -133,11 +154,10 @@
       "url": "https://www.zhihu.com/collection/497173158"
     },
     {
+      "archivedAt": "2026-09-26T02:57:08+08:00",
       "name": "健身锻炼",
+      "status": "archived",
       "url": "https://www.zhihu.com/collection/811493464"
     }
-  ],
-  "outputPath": "C:/Users/041/OneDrive/Projects/Zhihu-Collections-MCP/output",
-  "os": "windows",
-  "openCollection": false
+  ]
 }

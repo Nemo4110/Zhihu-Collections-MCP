@@ -19,7 +19,12 @@ from exporter import (
     export_collection_with_integrity,
     save_integrity_report,
 )
-from paths_config import load_config, parse_output_path
+from paths_config import (
+    COLLECTION_ARCHIVED_STATUS,
+    load_config,
+    mark_collections_archived,
+    parse_output_path,
+)
 import sources
 
 
@@ -126,6 +131,7 @@ def main(argv=None):
         logging.info("已启用 --page-candidates，本次运行将急切抓取回答网页候选")
     print(f"共找到 {len(zhihu_collections)} 个收藏夹待处理")
     collection_reports = []
+    skipped_archived = 0
     for collection in zhihu_collections:
         collection_name = collection.get('name', '未命名收藏夹')
         collection_url = collection.get('url', '')
@@ -135,6 +141,19 @@ def main(argv=None):
                 "url": collection_url,
                 "status": "config_error",
                 "collection": {"complete": False},
+                "items": [],
+            })
+            continue
+        if collection.get('status') == COLLECTION_ARCHIVED_STATUS:
+            # config 已标记远端删除：跳过请求（404 无需重复确认）。
+            # 重跑 fetch_collections.py 重建列表可清除标记，手动删除字段亦可。
+            skipped_archived += 1
+            logging.info(f"跳过已归档收藏夹: {collection_name}")
+            collection_reports.append({
+                "name": collection_name,
+                "url": collection_url,
+                "status": "archived_skipped",
+                "collection": {"complete": True},
                 "items": [],
             })
             continue
@@ -168,6 +187,20 @@ def main(argv=None):
             }
         collection_reports.append(report)
 
+    newly_archived_urls = [
+        report.get("url")
+        for report in collection_reports
+        if report.get("status") == "collection_archived"
+        and report.get("url")
+        and not report.get("audit_only")
+    ]
+    if newly_archived_urls:
+        # 把本轮检测到的远端删除写回 config（audit_only 报告已排除）
+        try:
+            mark_collections_archived('config.json', newly_archived_urls)
+        except (OSError, ValueError) as exc:
+            logging.warning(f"回写已归档收藏夹标记到 config.json 失败: {exc}")
+
     report_path = save_integrity_report(
         collection_reports, args.mode, logs_dir=output_root / "logs" if output_root else None
     )
@@ -191,10 +224,19 @@ def main(argv=None):
         len(collection.get("collection", {}).get("unsupported_items", []))
         for collection in collection_reports
     )
+    archived_collections = sum(
+        1
+        for collection in collection_reports
+        if collection.get("status") == "collection_archived"
+    )
     print("\n完整性处理完毕")
     print(f"已验证支持内容: {verified}")
     print(f"失败支持内容: {failed}")
     print(f"不支持内容: {unsupported}")
+    if archived_collections:
+        print(f"已归档收藏夹（远端已删除）: {archived_collections}")
+    if skipped_archived:
+        print(f"跳过已归档收藏夹（config 已标记）: {skipped_archived}")
     print(f"完整性报告: {report_path}")
     return exit_code
 
