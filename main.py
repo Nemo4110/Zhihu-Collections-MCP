@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from dataclasses import replace
 from utils import filter_title_str
+from paths_config import get_current_os, load_config, load_cookies, parse_output_path
 import json
 import logging
 import traceback
@@ -49,22 +50,6 @@ from integrity import (
 
 
 # 读取配置文件
-def load_config():
-    try:
-        with open('config.json', 'r', encoding='utf-8') as f:
-            config = json.load(f)
-            return config
-    except FileNotFoundError:
-        print("未找到config.json文件，尝试读取旧版zhihuUrls.json文件")
-        try:
-            with open('zhihuUrls.json', 'r', encoding='utf-8') as f:
-                urls = json.load(f)
-                return {"zhihuUrls": urls, "outputPath": "", "os": ""}
-        except FileNotFoundError:
-            print("未找到配置文件，请创建config.json文件并配置收藏夹信息")
-            return {"zhihuUrls": [], "outputPath": "", "os": ""}
-
-# 获取当前操作系统类型
 def get_current_os():
     system = platform.system().lower()
     if system == "windows":
@@ -77,73 +62,6 @@ def get_current_os():
         return "unknown"
 
 # 解析路径，根据操作系统类型处理
-def parse_output_path(path_str, os_type):
-    if not path_str:
-        return None
-    
-    # 如果没有指定os，则自动检测
-    if not os_type:
-        os_type = get_current_os()
-    
-    try:
-        if os_type.lower() == "windows":
-            # Windows路径处理
-            # 支持 D:\path\to\folder 或 D:/path/to/folder 格式
-            path_str = path_str.replace('/', '\\')
-            return pathlib.Path(path_str).resolve()
-        elif os_type.lower() in ["linux", "freebsd", "openbsd", "netbsd", "solaris", "aix"]:
-            # Unix-like系统路径处理
-            # 支持 /usr/local/lib 格式
-            if path_str.startswith('~'):
-                path_str = os.path.expanduser(path_str)
-            return pathlib.Path(path_str).resolve()
-        elif os_type.lower() in ["macos", "darwin"]:
-            # macOS路径处理
-            # 支持 /Users/username/Documents 或 ~/Documents 格式
-            if path_str.startswith('~'):
-                path_str = os.path.expanduser(path_str)
-            return pathlib.Path(path_str).resolve()
-        elif os_type.lower() in ["cygwin", "msys"]:
-            # Cygwin/MSYS环境路径处理
-            # 支持 /cygdrive/c/path 或 /c/path 格式
-            if path_str.startswith('/cygdrive/'):
-                # Cygwin格式: /cygdrive/c/path -> C:\path
-                drive_path = path_str[10:]  # 移除 /cygdrive/
-                if len(drive_path) >= 2 and drive_path[1] == '/':
-                    path_str = drive_path[0].upper() + ':' + drive_path[1:].replace('/', '\\')
-            elif path_str.startswith('/') and len(path_str) >= 3 and path_str[2] == '/':
-                # MSYS格式: /c/path -> C:\path
-                path_str = path_str[1].upper() + ':' + path_str[2:].replace('/', '\\')
-            return pathlib.Path(path_str).resolve()
-        else:
-            # 其他系统，尝试通用处理
-            logging.warning(f"未知操作系统类型: {os_type}，尝试通用路径处理")
-            if path_str.startswith('~'):
-                path_str = os.path.expanduser(path_str)
-            return pathlib.Path(path_str).resolve()
-    except Exception as e:
-        logging.error(f"路径解析失败: {path_str}, 错误: {str(e)}")
-        return None
-
-# 读取cookies
-def load_cookies(cookie_file=None):
-    cookie_path = pathlib.Path(
-        cookie_file or os.environ.get("ZHIHU_COOKIES_FILE", "cookies.json")
-    )
-    try:
-        with cookie_path.open('r', encoding='utf-8') as f:
-            cookies_list = json.load(f)
-        cookies_dict = {}
-        for cookie in cookies_list:
-            cookies_dict[cookie['name']] = cookie['value']
-        return cookies_dict
-    except FileNotFoundError:
-        print("未找到cookies.json文件，将使用无登录模式访问（部分内容可能无法获取）")
-        return {}
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
-        print(f"cookies文件格式无效，将使用无登录模式访问: {exc}")
-        return {}
-
 # 全局变量存储当前处理的收藏夹名称
 current_collection_name = ""
 

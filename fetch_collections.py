@@ -14,6 +14,8 @@ import pathlib
 import platform
 
 # 收藏夹列表 API 的公共请求头和分页大小
+from paths_config import get_current_os, load_config, load_cookies, parse_output_path
+
 API_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Connection": "keep-alive",
@@ -22,69 +24,6 @@ API_HEADERS = {
     "Referer": "https://www.zhihu.com/collections/mine",
 }
 COLLECTIONS_PAGE_LIMIT = 20
-
-
-def get_current_os():
-    """获取当前操作系统类型"""
-    system = platform.system().lower()
-    if system == "windows":
-        return "windows"
-    elif system == "darwin":
-        return "macos"
-    elif system == "linux":
-        return "linux"
-    else:
-        return "unknown"
-
-
-def parse_output_path(path_str, os_type):
-    """解析路径，根据操作系统类型处理"""
-    if not path_str:
-        return None
-    
-    # 如果没有指定os，则自动检测
-    if not os_type:
-        os_type = get_current_os()
-    
-    try:
-        if os_type.lower() == "windows":
-            # Windows路径处理
-            # 支持 D:\path\to\folder 或 D:/path/to/folder 格式
-            path_str = path_str.replace('/', '\\')
-            return pathlib.Path(path_str).resolve()
-        elif os_type.lower() in ["linux", "freebsd", "openbsd", "netbsd", "solaris", "aix"]:
-            # Unix-like系统路径处理
-            # 支持 /usr/local/lib 格式
-            if path_str.startswith('~'):
-                path_str = os.path.expanduser(path_str)
-            return pathlib.Path(path_str).resolve()
-        elif os_type.lower() in ["macos", "darwin"]:
-            # macOS路径处理
-            # 支持 /Users/username/Documents 或 ~/Documents 格式
-            if path_str.startswith('~'):
-                path_str = os.path.expanduser(path_str)
-            return pathlib.Path(path_str).resolve()
-        elif os_type.lower() in ["cygwin", "msys"]:
-            # Cygwin/MSYS环境路径处理
-            # 支持 /cygdrive/c/path 或 /c/path 格式
-            if path_str.startswith('/cygdrive/'):
-                # Cygwin格式: /cygdrive/c/path -> C:\path
-                drive_path = path_str[10:]  # 移除 /cygdrive/
-                if len(drive_path) >= 2 and drive_path[1] == '/':
-                    path_str = drive_path[0].upper() + ':' + drive_path[1:].replace('/', '\\')
-            elif path_str.startswith('/') and len(path_str) >= 3 and path_str[2] == '/':
-                # MSYS格式: /c/path -> C:\path
-                path_str = path_str[1].upper() + ':' + path_str[2:].replace('/', '\\')
-            return pathlib.Path(path_str).resolve()
-        else:
-            # 其他系统，尝试通用处理
-            logging.warning(f"未知操作系统类型: {os_type}，尝试通用路径处理")
-            if path_str.startswith('~'):
-                path_str = os.path.expanduser(path_str)
-            return pathlib.Path(path_str).resolve()
-    except Exception as e:
-        logging.error(f"路径解析失败: {path_str}, 错误: {str(e)}")
-        return None
 
 
 def setup_logging():
@@ -109,33 +48,6 @@ def setup_logging():
     )
     
     return log_path
-
-
-def load_cookies():
-    """加载cookies文件"""
-    try:
-        with open('cookies.json', 'r', encoding='utf-8') as f:
-            cookies_list = json.load(f)
-        cookies_dict = {}
-        for cookie in cookies_list:
-            cookies_dict[cookie['name']] = cookie['value']
-        return cookies_dict
-    except FileNotFoundError:
-        print("未找到cookies.json文件，将使用无登录模式访问（部分内容可能无法获取）")
-        logging.warning("未找到cookies.json文件")
-        return {}
-
-
-def load_config():
-    """加载配置文件"""
-    try:
-        with open('config.json', 'r', encoding='utf-8') as f:
-            config = json.load(f)
-            return config
-    except FileNotFoundError:
-        logging.error("未找到config.json文件")
-        print("未找到config.json文件，请确保文件存在")
-        return None
 
 
 def get_url_token(cookies=None):
