@@ -5,7 +5,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-import main
+import cli
 import exporter
 from integrity import ExportMode
 
@@ -24,34 +24,34 @@ def workspace_directory():
 
 class IntegrityCliTests(unittest.TestCase):
     def test_parse_modes(self):
-        self.assertEqual(main.parse_args([]).mode, ExportMode.BALANCED)
-        self.assertEqual(main.parse_args(["--audit"]).mode, ExportMode.AUDIT)
+        self.assertEqual(cli.parse_args([]).mode, ExportMode.BALANCED)
+        self.assertEqual(cli.parse_args(["--audit"]).mode, ExportMode.AUDIT)
         self.assertEqual(
-            main.parse_args(["--audit", "--repair"]).mode,
+            cli.parse_args(["--audit", "--repair"]).mode,
             ExportMode.AUDIT_REPAIR,
         )
-        self.assertEqual(main.parse_args(["--force"]).mode, ExportMode.FORCE)
+        self.assertEqual(cli.parse_args(["--force"]).mode, ExportMode.FORCE)
 
     def test_parse_no_page_candidates_flag(self):
-        self.assertFalse(main.parse_args([]).no_page_candidates)
-        self.assertTrue(main.parse_args(["--no-page-candidates"]).no_page_candidates)
+        self.assertFalse(cli.parse_args([]).no_page_candidates)
+        self.assertTrue(cli.parse_args(["--no-page-candidates"]).no_page_candidates)
         self.assertEqual(
-            main.parse_args(["--no-page-candidates"]).mode,
+            cli.parse_args(["--no-page-candidates"]).mode,
             ExportMode.BALANCED,
         )
 
     def test_parse_page_candidates_flags_are_mutually_exclusive(self):
-        self.assertFalse(main.parse_args([]).page_candidates)
-        self.assertTrue(main.parse_args(["--page-candidates"]).page_candidates)
+        self.assertFalse(cli.parse_args([]).page_candidates)
+        self.assertTrue(cli.parse_args(["--page-candidates"]).page_candidates)
         with self.assertRaises(SystemExit):
-            main.parse_args(["--page-candidates", "--no-page-candidates"])
+            cli.parse_args(["--page-candidates", "--no-page-candidates"])
 
     def test_invalid_mode_combinations_exit_two(self):
         with self.assertRaises(SystemExit) as repair_only:
-            main.parse_args(["--repair"])
+            cli.parse_args(["--repair"])
         self.assertEqual(repair_only.exception.code, 2)
         with self.assertRaises(SystemExit) as audit_force:
-            main.parse_args(["--audit", "--force"])
+            cli.parse_args(["--audit", "--force"])
         self.assertEqual(audit_force.exception.code, 2)
 
     def test_exit_code_zero_with_verified_and_unsupported_items(self):

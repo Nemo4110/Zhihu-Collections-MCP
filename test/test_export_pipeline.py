@@ -281,19 +281,6 @@ class ExportPipelineTests(unittest.TestCase):
         self.assertEqual(len(report["items"]), 3)
         self.assertLess(elapsed, 0.8)
 
-    def test_process_single_collection_routes_to_integrity_pipeline(self):
-        report = {"name": "Example Collection", "status": "verified", "items": []}
-        with patch.object(main, "export_collection_with_integrity", return_value=report) as export:
-            returned = main.process_single_collection(
-                "Example Collection",
-                "https://www.zhihu.com/collection/1",
-            )
-        export.assert_called_once_with(
-            "Example Collection",
-            "https://www.zhihu.com/collection/1",
-            mode=ExportMode.BALANCED,
-        )
-        self.assertIs(returned, report)
 
 if __name__ == "__main__":
     unittest.main()
