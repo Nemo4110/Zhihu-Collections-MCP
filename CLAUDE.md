@@ -17,8 +17,6 @@ Export-Zhihu-Collections 是一个将知乎收藏夹导出为 Markdown 格式的
   - `load_config()`: 加载和解析配置文件
   - `parse_output_path()`: 跨平台路径解析和处理
   - `get_article_urls_in_collection()`: 使用知乎 API 获取收藏夹中的所有 URL
-  - `get_single_answer_content()`: 从问答页面提取回答内容（增强版，支持多种页面结构）
-  - `get_single_post_content()`: 从专栏文章提取内容（增强版，支持多种页面结构）
   - `process_single_collection()`: 处理单个收藏夹的完整流程
   - `flush_logs()`: 实时日志刷新功能
   - `setup_debug_logging()`: 调试日志配置
