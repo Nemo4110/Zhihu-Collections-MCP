@@ -17,8 +17,9 @@ from mcp.server import Server
 from mcp.types import Tool, TextContent
 from mcp.server.stdio import stdio_server
 
-# 导入main模块的功能
-import main
+import exporter
+import sources
+from paths_config import load_config, parse_output_path
 
 # 创建MCP服务器实例
 app = Server("zhihu-collections")
@@ -110,7 +111,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
 async def list_collections_handler() -> list[TextContent]:
     """处理list_collections工具调用"""
-    config = main.load_config()
+    config = load_config()
     collections = config.get("zhihuUrls", [])
 
     if not collections:
@@ -127,7 +128,7 @@ async def list_collections_handler() -> list[TextContent]:
 
 
 async def export_collection_handler(args: dict) -> list[TextContent]:
-    """处理export_collection工具调用"""
+    """处理export_collection工具调用：走完整性导出管线。"""
     collection_url = args.get("collection_url")
     collection_name = args.get("collection_name", "")
     output_dir = args.get("output_dir", "")
@@ -140,28 +141,25 @@ async def export_collection_handler(args: dict) -> list[TextContent]:
         collection_id = collection_url.split('?')[0].split('/')[-1]
         collection_name = f"收藏夹_{collection_id}"
 
-    # 解析输出路径
-    output_path = None
+    # 解析输出根目录（未指定时用导出引擎默认 downloads/）
+    output_root = None
     if output_dir:
-        config = main.load_config()
-        os_type = config.get("os", "")
-        output_path = main.parse_output_path(output_dir, os_type)
+        config = load_config()
+        output_root = parse_output_path(output_dir, config.get("os", ""))
 
-    # 设置输出路径
-    if output_path:
-        original_output = main.parse_output_path(config.get("outputPath", ""), config.get("os", ""))
-        main.OUTPUT_PATH = str(output_path)
-    else:
-        main.OUTPUT_PATH = main.get_output_path(collection_name)
-
+    rendered_root = str(output_root) if output_root else str(exporter.DEFAULT_OUTPUT_ROOT)
     result = f"🚀 开始导出收藏夹：{collection_name}\n"
     result += f"📎 URL: {collection_url}\n"
-    result += f"📁 输出目录: {main.OUTPUT_PATH}\n\n"
+    result += f"📁 输出目录: {rendered_root}\n\n"
 
-    # 执行导出
+    # 执行导出（verify/adopt/repair/refresh + 完整性清单）
     try:
-        main.process_single_collection(collection_name, collection_url)
-        result += "✅ 导出完成！"
+        report = exporter.export_collection_with_integrity(
+            collection_name,
+            collection_url,
+            output_root=output_root,
+        )
+        result += f"✅ 导出完成！状态: {report.get('status', 'unknown')}"
     except Exception as e:
         result += f"❌ 导出失败: {str(e)}"
 
@@ -177,11 +175,20 @@ async def get_collection_info_handler(args: dict) -> list[TextContent]:
 
     try:
         collection_id = collection_url.split('?')[0].split('/')[-1]
-        urls, titles = main.get_article_urls_in_collection(collection_id)
+        fetch_result = sources.fetch_collection_items(collection_id)
 
+        if not fetch_result.complete:
+            return [TextContent(
+                type="text",
+                text=f"获取收藏夹信息失败: 收藏夹获取不完整（失败页: {fetch_result.page_failures}）",
+            )]
+
+        titles = [item.title for item in fetch_result.exportable_items]
         result = f"📊 收藏夹信息\n\n"
         result += f"🆔 收藏夹ID: {collection_id}\n"
-        result += f"📝 文章数量: {len(urls)}\n"
+        result += f"📝 文章数量: {len(titles)}\n"
+        if fetch_result.unsupported_items:
+            result += f"📌 不支持类型: {len(fetch_result.unsupported_items)} 项\n"
 
         if titles:
             result += f"\n📄 文章标题（前5个）：\n"
@@ -202,7 +209,7 @@ async def search_collections_handler(args: dict) -> list[TextContent]:
     if not keyword:
         return [TextContent(type="text", text="错误: 需要提供keyword参数")]
 
-    config = main.load_config()
+    config = load_config()
     collections = config.get("zhihuUrls", [])
 
     if not collections:

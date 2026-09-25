@@ -191,17 +191,6 @@ def fetch_collection_items(
     return result
 
 
-def get_article_urls_in_collection(collection_id):
-    """Compatibility wrapper returning URL/title lists for existing MCP tools."""
-    result = fetch_collection_items(collection_id)
-    if not result.complete:
-        return [], []
-    return (
-        [item.url for item in result.exportable_items],
-        [item.title for item in result.exportable_items],
-    )
-
-
 def _blocked_or_login_page(html_text):
     preview = BeautifulSoup(html_text or "", "lxml").get_text(" ", strip=True).lower()
     markers = ("请登录后继续", "登录 - 知乎", "安全验证", "请求存在异常")

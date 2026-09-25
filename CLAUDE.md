@@ -12,21 +12,18 @@ Export-Zhihu-Collections 是一个将知乎收藏夹导出为 Markdown 格式的
 
 ## 核心组件
 
-### 主要架构
-- **main.py**: 包含收藏夹导出逻辑的主脚本
-  - `load_config()`: 加载和解析配置文件
-  - `parse_output_path()`: 跨平台路径解析和处理
-  - `get_article_urls_in_collection()`: 使用知乎 API 获取收藏夹中的所有 URL
-  - `process_single_collection()`: 处理单个收藏夹的完整流程
-  - `flush_logs()`: 实时日志刷新功能
-  - `setup_debug_logging()`: 调试日志配置
-  - `get_debug_path()`: 获取调试文件保存路径
-  - `ObsidianStyleConverter`: 用于 Obsidian 风格输出的自定义 MarkdownConverter
-- **fetch_collections.py**: 独立的收藏夹获取脚本
-  - `get_collections_from_page()`: 从知乎页面解析收藏夹信息
-  - `update_config_with_collections()`: 自动更新配置文件
+### 主要架构（深模块分层）
+- **cli.py**: 命令行装配层（参数解析、配置加载、日志装配、输出根解析），导入零副作用
+- **exporter.py**: 导出引擎深模块——`export_item_with_integrity()`（单项 verify/adopt/repair/refresh）、`export_collection_with_integrity()`（收藏夹级并发导出 + 清单落盘，`output_root` 显式注入）、`determine_exit_code()`、`save_integrity_report()`
+- **sources.py**: 知乎源数据抓取层——`fetch_collection_items()`（分页对账）、`fetch_answer_snapshots()` / `fetch_article_snapshots()`（API/网页双候选）、`fetch_source_snapshot()`、网页候选熔断状态
+- **render.py**: 渲染模块——`Renderer` / `render_markdown()`（快照 HTML → Obsidian Markdown，公式转 LaTeX）、`prefetch_images()`（并发预取）；assets_dir 与 client 显式注入，无全局状态
+- **zhihu_client.py**: 知乎 HTTP 边界适配器——`ZhihuClient`（`get_api` / `get_page` / `get_page_data` / `download`）持有头部策略与重试退避；`default_client()` 情性加载一次 Cookie
+- **integrity.py**: 导出完整性核心模块（纯逻辑），负责规范 URL、源内容/Markdown 哈希、公式与图片的对称文本归一化、分段相似度覆盖率、警告分级、图片清单、原子写入、完整性清单、刷新策略和运行报告
+- **paths_config.py**: 配置与跨平台路径模块——`load_config()` / `parse_output_path()` / `load_cookies()` / `get_current_os()`，路径参数可注入
+- **main.py**: 向后兼容的 CLI 入口 shim（`python main.py` 用法不变）
+- **fetch_collections.py**: 独立的收藏夹获取脚本（复用 paths_config）
+- **mcp_server.py**: MCP 服务，直接接 exporter/sources 深模块接口（导出走完整性管线）
 - **utils.py**: 包含用于文件名清理的 `filter_title_str()` 函数
-- **integrity.py**: 导出完整性核心模块，负责规范 URL、源内容/Markdown 哈希、公式与图片的对称文本归一化、分段相似度覆盖率、警告分级、图片清单、原子写入、完整性清单、刷新策略和运行报告
 - **config.json**: 主配置文件，包含收藏夹列表、输出路径和系统设置
 - **config_examples.json**: 各种操作系统的配置示例
 - **zhihuUrls.json**: 旧版收藏夹URL列表文件（向后兼容）
@@ -121,29 +118,30 @@ python main.py
 
 ```
 /
-├── main.py              # 主导出脚本
-├── fetch_collections.py # 独立的收藏夹获取脚本
+├── main.py              # CLI 入口 shim（装配在 cli.py）
+├── cli.py               # 命令行装配（参数/配置/日志/输出根，导入零副作用）
+├── exporter.py          # 导出引擎（清单/报告/退出码/并发导出）
+├── sources.py           # 知乎抓取层（分页对账/双候选/熔断）
+├── render.py            # 渲染（HTML→Markdown/公式/图片资产）
+├── zhihu_client.py      # 知乎 HTTP 边界适配器
+├── paths_config.py      # 配置/跨平台路径/Cookie
+├── integrity.py         # 完整性校验核心（纯逻辑）
 ├── utils.py             # 工具函数
+├── mcp_server.py        # MCP 服务（接深模块接口）
+├── fetch_collections.py # 独立的收藏夹获取脚本
 ├── requirements.txt     # Python 依赖
 ├── config.json          # 主配置文件
 ├── config_examples.json # 配置示例文件
 ├── zhihuUrls.json       # 旧版URL列表（向后兼容）
 ├── cookies.json         # 认证 cookies（可选）
-├── test/                # 测试文件目录
-│   ├── README.md        # 测试说明文档
-│   ├── test_*.py        # 各种功能测试脚本
-│   └── __init__.py      # Python 包初始化文件
+├── scripts/             # 一次性诊断脚本
+├── test/                # 测试文件目录（按接缝组织）
 └── downloads/           # 默认输出目录
     ├── 收藏夹名称1/      # 按收藏夹名称分类的输出目录
     │   ├── *.md         # 导出的 markdown 文件
     │   └── assets/      # 下载的图片
     ├── 收藏夹名称2/
-    ├── logs/            # 处理日志文件
-    │   ├── debug_*.log  # 调试日志
-    │   └── *.json       # 处理结果日志
-    └── debug/           # 调试HTML文件
-        ├── debug_answer_*.html  # 回答页面调试文件
-        └── debug_post_*.html    # 专栏文章调试文件
+    └── logs/            # 处理日志文件
 ```
 
 ## 认证
