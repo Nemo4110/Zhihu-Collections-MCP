@@ -21,6 +21,8 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from bs4 import BeautifulSoup, NavigableString
 
 SCHEMA_VERSION = 1
+# 归档目录（.archived.items/<收藏夹>/）下的归档历史清单文件名
+ARCHIVED_ITEMS_MANIFEST_NAME = ".archived-manifest.json"
 TEXT_COVERAGE_THRESHOLD = 0.98
 TEXT_COVERAGE_WARNING_THRESHOLD = 0.90
 ENDPOINT_SEGMENT_THRESHOLD = 0.90
@@ -496,6 +498,21 @@ class IntegrityManifestStore:
         atomic_write_json(self.path, payload)
 
 
+def append_archived_items_manifest(archive_dir, entries):
+    """把本轮归档条目追加到归档目录的 .archived-manifest.json（累积历史）。"""
+    manifest_path = Path(archive_dir) / ARCHIVED_ITEMS_MANIFEST_NAME
+    payload = []
+    if manifest_path.exists():
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(existing, list):
+                payload = existing
+        except (OSError, json.JSONDecodeError):
+            payload = []
+    payload.extend(entries)
+    atomic_write_json(manifest_path, payload)
+
+
 def local_record_is_intact(
     record: dict[str, Any] | None,
     markdown_path: str | Path,
@@ -610,6 +627,11 @@ class CollectionFetchResult:
     page_failures: list[dict[str, Any]] = field(default_factory=list)
     reached_end: bool = False
     total_mismatch: dict[str, int] | None = None
+    # 远端已删除该收藏夹。404 路径由 reconcile 从分页失败推导；
+    # 知乎对已删除夹子的 items API 仍返回 200+空列表，需 sources 经
+    # 元信息 API 二次确认后置位 confirmed_deleted，再由 reconcile 聚合。
+    confirmed_deleted: bool = False
+    not_found: bool = False
     complete: bool = False
     _seen_urls: set[str] = field(default_factory=set, repr=False)
 
@@ -669,8 +691,23 @@ class CollectionFetchResult:
             if end_reconciles_gap
             else None
         )
+        # 收藏夹被删除的判定：从未取到任何条目，且所有分页失败均为 HTTP 404；
+        # 或分页返回空列表但元信息 API 确认 404（confirmed_deleted）。
+        # 网络错误、5xx、限流或分页中途失败不会置位，避免把临时故障误判为删除。
+        self.not_found = (
+            self.confirmed_deleted
+            or (
+                self.raw_item_count == 0
+                and bool(self.page_failures)
+                and all(
+                    failure.get("status_code") == 404
+                    for failure in self.page_failures
+                )
+            )
+        )
         self.complete = (
-            not self.page_failures
+            not self.not_found
+            and not self.page_failures
             and not self.malformed_items
             and (total_matches or end_reconciles_gap)
             and classified == self.raw_item_count
@@ -689,6 +726,8 @@ class CollectionFetchResult:
             "page_failures": self.page_failures,
             "reached_end": self.reached_end,
             "total_mismatch": self.total_mismatch,
+            "confirmed_deleted": self.confirmed_deleted,
+            "not_found": self.not_found,
             "complete": self.complete,
         }
 

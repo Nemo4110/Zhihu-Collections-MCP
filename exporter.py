@@ -8,7 +8,9 @@
 import logging
 import os
 import pathlib
+import shutil
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -19,6 +21,7 @@ from integrity import (
     ManifestSchemaError,
     SourceContentError,
     SourceMetadata,
+    append_archived_items_manifest,
     atomic_write_json,
     atomic_write_text,
     decide_action,
@@ -43,6 +46,10 @@ ITEM_EXPORT_WORKERS = 3
 
 DEFAULT_OUTPUT_ROOT = pathlib.Path(__file__).resolve().parent / "downloads"
 
+# 远端删除同步：已删除收藏夹与已移出条目的归档目录名（位于输出根目录下）
+ARCHIVED_COLLECTIONS_DIRNAME = ".archived.collections"
+ARCHIVED_ITEMS_DIRNAME = ".archived.items"
+
 
 def collection_output_dir(output_root, collection_name):
     """收藏夹名清理为安全的单段目录名，拼接到输出根目录下。"""
@@ -50,6 +57,124 @@ def collection_output_dir(output_root, collection_name):
     if not safe_name:
         safe_name = "未命名收藏夹"
     return pathlib.Path(output_root) / safe_name
+
+
+def _unique_destination(directory, name):
+    """返回 directory/name 的唯一路径：冲突时追加序号后缀。"""
+    target = directory / name
+    if not target.exists():
+        return target
+    stem, suffix = os.path.splitext(name)
+    index = 2
+    while (directory / f"{stem}-{index}{suffix}").exists():
+        index += 1
+    return directory / f"{stem}-{index}{suffix}"
+
+
+def _transfer_with_retry(source, target, copy=False, attempts=4):
+    """移动（默认）或复制文件，同步盘瞬时锁定时短退避重试。
+
+    镜像 integrity.atomic_write_text 对 WinError 5 的容错：OneDrive 等
+    同步盘可能短暂锁定文件，直接失败会让归档中断并让整个收藏夹导出失败。
+    """
+    for attempt in range(attempts):
+        try:
+            if copy:
+                shutil.copy2(str(source), str(target))
+            else:
+                shutil.move(str(source), str(target))
+            return
+        except PermissionError:
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(0.05 * (2 ** attempt))
+
+
+def archive_collection_dir(output_root, collection_name):
+    """收藏夹远端已删除时，把整个本地输出目录移入 .archived.collections/。
+
+    目录连同 .zhihu-integrity.json 一起移动，便于用户日后恢复；返回归档
+    目标路径，本地无目录可归档时返回 None。
+    """
+    source = collection_output_dir(output_root, collection_name)
+    if not source.is_dir():
+        return None
+    archive_root = pathlib.Path(output_root) / ARCHIVED_COLLECTIONS_DIRNAME
+    archive_root.mkdir(parents=True, exist_ok=True)
+    target = _unique_destination(archive_root, source.name)
+    _transfer_with_retry(source, target)
+    return target
+
+
+def archive_removed_items(output_root, collection_name, manifest, current_urls):
+    """把已不在收藏夹列表中的已导出条目移入 .archived.items/<收藏夹>/。
+
+    仅在收藏夹分页完整的前提下调用（分页不完整时不得动本地文件）。
+    Markdown 与其引用的 assets 保持同名相对结构，归档后链接继续有效；
+    被其余保留条目共享的图片复制而非移动，避免破坏仍有效的导出。
+    清单记录同步移除并落盘；返回逐条归档报告。
+    """
+    collection_dir = collection_output_dir(output_root, collection_name)
+    if not collection_dir.is_dir():
+        return []
+    removed_urls = [url for url in manifest.records if url not in current_urls]
+    if not removed_urls:
+        return []
+    retained_urls = set(manifest.records) - set(removed_urls)
+    retained_asset_filenames = {
+        asset.get("filename")
+        for url in retained_urls
+        for asset in (manifest.records[url].get("assets") or [])
+        if asset.get("filename")
+    }
+    archive_dir = pathlib.Path(output_root) / ARCHIVED_ITEMS_DIRNAME / collection_dir.name
+    archived_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    archived = []
+    moved_any = False
+    for url in removed_urls:
+        record = manifest.records[url]
+        markdown_name = record.get("markdown_path")
+        source_path = collection_dir / markdown_name if markdown_name else None
+        moved = False
+        if source_path and source_path.is_file():
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            _transfer_with_retry(
+                source_path, _unique_destination(archive_dir, source_path.name)
+            )
+            moved = True
+            moved_any = True
+            # 仅迁移本地确实存在的图片；共享图片复制，独占图片移动
+            for asset in record.get("assets") or []:
+                filename = asset.get("filename")
+                if not filename:
+                    continue
+                asset_source = collection_dir / "assets" / filename
+                if not asset_source.is_file():
+                    continue
+                archive_assets = archive_dir / "assets"
+                archive_assets.mkdir(parents=True, exist_ok=True)
+                asset_target = _unique_destination(archive_assets, filename)
+                _transfer_with_retry(
+                    asset_source, asset_target, copy=filename in retained_asset_filenames
+                )
+        del manifest.records[url]
+        archived.append({
+            "url": url,
+            "title": record.get("title"),
+            "markdown_path": markdown_name,
+            "archived": moved,
+            "archived_at": archived_at,
+        })
+    try:
+        manifest.save()
+    except OSError as exc:
+        # 同步盘锁定等瞬时故障：不中断归档（文件已移动）。清单会在下一项
+        # 完成时再次落盘；若本次无导出项，下次运行时记录指向的缺失文件
+        # 会走 missing 分支再次清理，最终自动对齐。
+        logging.warning(f"归档后清单保存失败（将在下一项完成时重试）: {exc}")
+    if moved_any:
+        append_archived_items_manifest(archive_dir, archived)
+    return archived
 
 
 def is_article_already_downloaded(file_path, target_url):
@@ -99,27 +224,6 @@ def get_unique_filename(base_dir, title, url):
     return os.path.join(base_dir, unique_filename + ".md")
 
 
-
-
-def save_processing_log():
-    """
-    保存处理日志到logs目录
-    """
-    logs_dir = pathlib.Path(logs_dir) if logs_dir else DEFAULT_OUTPUT_ROOT / 'logs'
-    if not os.path.exists(logs_dir):
-        os.makedirs(logs_dir)
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = f"{timestamp}.json"
-    log_path = os.path.join(logs_dir, log_filename)
-    
-    with open(log_path, 'w', encoding='utf-8') as f:
-        json.dump(processing_log, f, ensure_ascii=False, indent=2)
-    
-    print(f"处理日志已保存到: {log_path}")
-
-
-
 def _default_fetch_metadata(item):
     if item.source_type == "answer":
         return fetch_answer_metadata(item.url)
@@ -134,12 +238,6 @@ def _default_render_markdown_for(assets_dir):
         body = render_markdown(snapshot.html, assets_dir, heading_style="ATX")
         return f"> {item.url}\n{body}"
     return render
-
-
-# 清单写入/保存互斥锁：项级并发导出时保护 manifest.records 与 save() 序列化
-_manifest_lock = threading.Lock()
-# 项级并发数：控制正文 API 与渲染的并发峰值，避免触发知乎限流
-ITEM_EXPORT_WORKERS = 3
 
 
 def export_item_with_integrity(
@@ -341,11 +439,34 @@ def export_collection_with_integrity(
         "collection": result.to_dict(),
         "items": [],
     }
+    root = pathlib.Path(output_root) if output_root else DEFAULT_OUTPUT_ROOT
     if not result.complete:
+        if result.not_found:
+            if mode == ExportMode.AUDIT:
+                # 严格只读审计：仅报告远端已删除，不移动任何文件；
+                # 非 audit 模式（含 --audit --repair）才真正归档。
+                collection_report["status"] = "collection_archived"
+                collection_report["archive_path"] = None
+                collection_report["audit_only"] = True
+                logging.info(
+                    f"收藏夹 {collection_name} 已在远端删除（--audit 只读，未归档本地目录）"
+                )
+                return collection_report
+            # 远端已删除该收藏夹：本地目录整体归档到 .archived.collections/，
+            # 视为正确同步了删除操作，不计入失败退出码。
+            archive_path = archive_collection_dir(root, collection_name)
+            collection_report["status"] = "collection_archived"
+            collection_report["archive_path"] = str(archive_path) if archive_path else None
+            if archive_path:
+                logging.info(
+                    f"收藏夹 {collection_name} 已在远端删除，本地目录已归档: {archive_path}"
+                )
+            else:
+                logging.info(f"收藏夹 {collection_name} 已在远端删除，本地无输出目录可归档")
+            return collection_report
         collection_report["status"] = "collection_incomplete"
         return collection_report
 
-    root = pathlib.Path(output_root) if output_root else DEFAULT_OUTPUT_ROOT
     collection_dir = collection_output_dir(root, collection_name)
     collection_dir.mkdir(parents=True, exist_ok=True)
     manifest = IntegrityManifestStore.load(
@@ -353,6 +474,33 @@ def export_collection_with_integrity(
         expected_collection_id=collection_id,
         collection_url=collection_url,
     )
+    # 删除同步：清单中已不在收藏夹列表里的条目归档到 .archived.items/<收藏夹>/。
+    # 仅在分页完整时执行；--audit 严格只读，只报告不动文件。
+    current_urls = {item.url for item in result.exportable_items}
+    pending_removed = any(url not in current_urls for url in manifest.records)
+    if pending_removed and result.total_mismatch:
+        # 分页对账异常（隐藏/失效条目仍计入 totals）时，无法区分「用户取消
+        # 收藏」与「暂时不可见」：本轮不归档也不报告，待 totals 恢复一致再同步。
+        logging.info(
+            f"收藏夹 {collection_name} 存在 total_mismatch，本轮跳过疑似移出条目的归档"
+        )
+    elif mode == ExportMode.AUDIT:
+        archivable = [
+            {"url": url, "title": manifest.records[url].get("title")}
+            for url in sorted(manifest.records)
+            if url not in current_urls
+        ]
+        if archivable:
+            collection_report["archivable_items"] = archivable
+    else:
+        archived_items = archive_removed_items(root, collection_name, manifest, current_urls)
+        if archived_items:
+            collection_report["archived_items"] = archived_items
+            for entry in archived_items:
+                logging.info(
+                    f"条目已移出收藏夹 {collection_name}，本地文件已归档: "
+                    f"{entry['title']} -> {ARCHIVED_ITEMS_DIRNAME}/{collection_dir.name}/"
+                )
     total_items = len(result.exportable_items)
     # 项级并发导出：IO 密集（正文 API + 图片下载），并发数由 ITEM_EXPORT_WORKERS 控制；
     # 清单读写通过 _manifest_lock 互斥，每项完成后仍即时落盘。
@@ -404,7 +552,12 @@ def export_collection_with_integrity(
 def determine_exit_code(collection_reports):
     if any(
         report.get("status") in {"collection_incomplete", "manifest_error", "config_error"}
-        or not report.get("collection", {}).get("complete", True)
+        or (
+            # collection_archived 是对远端删除的正确同步，不算失败；
+            # 其余 incomplete/complete=False 仍是配置/分页级失败。
+            report.get("status") != "collection_archived"
+            and not report.get("collection", {}).get("complete", True)
+        )
         for report in collection_reports
     ):
         return 2

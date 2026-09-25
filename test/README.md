@@ -14,8 +14,8 @@
 | zhihu_client | test_zhihu_client.py | HTTP 边界适配器（假传输注入） |
 | sources | test_source_candidates.py, test_collection_reconciliation.py | 抓取层（双候选/分页对账/熔断） |
 | render | test_render.py, test_image_download_retry.py | 渲染与图片资产 |
-| exporter | test_exporter.py, test_export_pipeline.py | 导出引擎（清单/报告/并发） |
-| integrity | test_integrity_*.py | 完整性核心（纯逻辑） |
+| exporter | test_exporter.py, test_export_pipeline.py, test_archive_sync.py | 导出引擎（清单/报告/并发/远端删除归档） |
+| integrity | test_integrity_*.py | 完整性核心（纯逻辑，含 not_found 判定） |
 | cli | test_cli.py, test_integrity_cli.py | 装配（导入纯度/标志传播/退出码） |
 | mcp_server | test_mcp_server.py | MCP 工具路由（引擎打桩） |
 | 其他 | test_markdown_migration.py, test_zotero_ingestion.py, test_fetch_collections.py, test_debug_path.py | 独立脚本功能 |

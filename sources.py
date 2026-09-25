@@ -37,6 +37,28 @@ def _client(request_get=None, sleep=None):
     )
 
 
+def _error_status_code(exc):
+    """从异常中提取 HTTP 状态码（requests.HTTPError 有 response，其余返回 None）。"""
+    return getattr(getattr(exc, "response", None), "status_code", None)
+
+
+def _collection_confirmed_deleted(collection_id, request_get=None):
+    """确认收藏夹是否已被远端删除。
+
+    知乎删除收藏夹后，items 分页 API 仍返回 200 + totals=0 + 空列表，
+    唯有元信息 API /api/v4/collections/{id} 返回 404（新建空夹则为 200）。
+    仅元信息 404 判定删除；其他错误（403/5xx/网络故障）一律不判定，
+    避免把权限不足或瞬时故障误判为删除。
+    """
+    try:
+        _client(request_get).get_page_data(
+            f"https://www.zhihu.com/api/v4/collections/{collection_id}"
+        )
+        return False
+    except Exception as exc:
+        return _error_status_code(exc) == 404
+
+
 # 获取收藏夹的回答总数
 def get_article_nums_of_collection(
     collection_id,
@@ -58,6 +80,9 @@ def get_article_nums_of_collection(
             return int(total)
         except Exception as exc:
             last_error = exc
+            if _error_status_code(exc) == 404:
+                # 404 是确定性失败（资源不存在），重试与退避只会拖慢运行并刷日志
+                break
             if attempt < attempts - 1:
                 sleep(2 ** attempt)
     logging.error(f"获取收藏夹 {collection_id} 总数失败: {last_error}")
@@ -110,12 +135,20 @@ def fetch_collection_items(
                 break
             except Exception as exc:
                 last_error = exc
+                if _error_status_code(exc) == 404:
+                    # 404 是确定性失败（资源不存在），重试与退避只会拖慢运行并刷日志
+                    break
                 if attempt < attempts - 1:
                     sleep(2 ** attempt)
         if payload is None:
             if result is None:
                 result = CollectionFetchResult(collection_id, 0)
-            result.page_failures.append({"offset": offset, "error": str(last_error)})
+            # 记录 HTTP 状态码供 not_found 判定（区分「收藏夹已删除」与网络故障）。
+            result.page_failures.append({
+                "offset": offset,
+                "error": str(last_error),
+                "status_code": _error_status_code(last_error),
+            })
             break
 
         page_items = payload['data']
@@ -133,6 +166,8 @@ def fetch_collection_items(
                     totals = get_total(collection_id)
                 except Exception as exc:
                     result = CollectionFetchResult(collection_id, 0)
+                    # 首页已成功返回，收藏夹存在；此处仅总数回退请求失败。
+                    # 不记录 status_code，避免 404 被 not_found 误判为收藏夹已删除而归档。
                     result.page_failures.append({"offset": 0, "error": str(exc)})
                     result.reconcile()
                     return result
@@ -144,6 +179,11 @@ def fetch_collection_items(
             logging.info(f"收藏夹 {collection_id} 包含 {totals} 个项目")
             result = CollectionFetchResult(collection_id, int(totals))
             if result.expected_total == 0:
+                # 空列表两种可能：已删除的夹子（items API 仍 200）或新建空夹，
+                # 经元信息 API 确认后由 reconcile 聚合进 not_found。
+                result.confirmed_deleted = _collection_confirmed_deleted(
+                    collection_id, request_get
+                )
                 result.reconcile()
                 return result
 
