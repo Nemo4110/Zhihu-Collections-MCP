@@ -22,6 +22,18 @@ import cli
 import sources
 from integrity import ExportMode
 from paths_config import mark_collections_archived
+from zhihu_client import AuthenticationError, AuthenticationStatus
+
+
+class CliTestCase(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(
+            cli,
+            "preflight_authentication",
+            return_value=AuthenticationStatus(authenticated=True),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 @contextmanager
@@ -82,7 +94,7 @@ class ImportPurityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
 
 
-class FlagPropagationTests(unittest.TestCase):
+class FlagPropagationTests(CliTestCase):
     def run_cli(self, argv):
         with patch.object(cli, "export_collection_with_integrity", return_value=dict(VERIFIED_REPORT)):
             with patch.object(cli, "save_integrity_report") as save:
@@ -130,7 +142,7 @@ class FlagPropagationTests(unittest.TestCase):
                 os.chdir(cwd)
 
 
-class AssemblyTests(unittest.TestCase):
+class AssemblyTests(CliTestCase):
     def test_open_collection_mode_returns_config_error(self):
         with workspace_directory() as directory:
             write_config(directory, open_collection=True)
@@ -171,7 +183,66 @@ class AssemblyTests(unittest.TestCase):
                 os.chdir(cwd)
 
 
-class ArchiveSummaryTests(unittest.TestCase):
+class AuthenticationCliTests(CliTestCase):
+    def test_expired_cookie_stops_before_export_and_returns_three(self):
+        with workspace_directory() as directory:
+            write_config(directory)
+            cwd = os.getcwd()
+            os.chdir(directory)
+            try:
+                with patch.object(
+                    cli, "preflight_authentication",
+                    side_effect=AuthenticationError("Cookie 已失效"),
+                ), patch.object(cli, "export_collection_with_integrity") as export, patch.object(
+                    cli, "save_integrity_report", return_value=Path("x") / "integrity.json"
+                ) as save:
+                    code = cli.main([])
+                self.assertEqual(code, 3)
+                export.assert_not_called()
+                report = save.call_args.args[0][0]
+                self.assertEqual(report["status"], "authentication_failed")
+            finally:
+                os.chdir(cwd)
+
+    def test_custom_output_initializes_logging_once(self):
+        with workspace_directory() as directory:
+            out_root = directory / "输出"
+            write_config(directory, output_path=str(out_root))
+            cwd = os.getcwd()
+            os.chdir(directory)
+            try:
+                with patch.object(cli, "setup_logging") as setup, patch.object(
+                    cli, "export_collection_with_integrity", return_value=dict(VERIFIED_REPORT)
+                ), patch.object(cli, "save_integrity_report"):
+                    cli.main([])
+                setup.assert_called_once_with(out_root.resolve() / "logs")
+            finally:
+                os.chdir(cwd)
+
+    def test_mid_run_authentication_failure_stops_remaining_collections(self):
+        with workspace_directory() as directory:
+            write_config(directory, collections=[
+                {"name": "甲", "url": "https://www.zhihu.com/collection/1"},
+                {"name": "乙", "url": "https://www.zhihu.com/collection/2"},
+            ])
+            cwd = os.getcwd()
+            os.chdir(directory)
+            try:
+                with patch.object(
+                    cli, "export_collection_with_integrity",
+                    side_effect=AuthenticationError("HTTP 401"),
+                ) as export, patch.object(
+                    cli, "save_integrity_report", return_value=Path("x") / "integrity.json"
+                ):
+                    code = cli.main([])
+                self.assertEqual(code, 3)
+                self.assertEqual(export.call_count, 1)
+                self.assertTrue(export.call_args.kwargs["allow_deletion_sync"])
+            finally:
+                os.chdir(cwd)
+
+
+class ArchiveSummaryTests(CliTestCase):
     def test_archived_collections_are_summarized_and_exit_zero(self):
         """远端删除导致的归档要在汇总里可见，且不产生失败退出码。"""
         with workspace_directory() as directory:

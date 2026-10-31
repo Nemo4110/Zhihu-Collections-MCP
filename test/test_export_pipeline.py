@@ -9,6 +9,7 @@ from pathlib import Path
 
 import main
 import exporter
+from zhihu_client import AuthenticationError
 from integrity import (
     CollectionFetchResult,
     CollectionItem,
@@ -176,6 +177,77 @@ class ExportPipelineTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), original)
             self.assertNotIn(self.url, store.records)
 
+
+    def test_authentication_error_is_not_reported_as_source_failure(self):
+        with workspace_directory() as directory:
+            store = self.make_store(directory)
+            with self.assertRaises(AuthenticationError):
+                exporter.export_item_with_integrity(
+                    self.item,
+                    directory,
+                    store,
+                    fetch_metadata_fn=lambda _: self.metadata,
+                    fetch_snapshot_fn=lambda _: (_ for _ in ()).throw(
+                        AuthenticationError("HTTP 401")
+                    ),
+                )
+            self.assertNotIn(self.url, store.records)
+            self.assertFalse((directory / "Example.md").exists())
+
+    def test_collection_cancels_pending_items_after_authentication_error(self):
+        class FakeFuture:
+            def __init__(self, error=None):
+                self.error = error
+                self.cancelled = False
+
+            def result(self):
+                if self.error:
+                    raise self.error
+                return {"status": "skipped_verified", "issues": []}
+
+            def cancel(self):
+                self.cancelled = True
+                return True
+
+        class FakeExecutor:
+            def __init__(self):
+                self.futures = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def submit(self, *args, **kwargs):
+                future = FakeFuture(
+                    AuthenticationError("HTTP 401") if not self.futures else None
+                )
+                self.futures.append(future)
+                return future
+
+        second_url = "https://www.zhihu.com/question/1/answer/3"
+        fetch_result = CollectionFetchResult("1", 2)
+        fetch_result.exportable_items = [
+            self.item,
+            CollectionItem("Second", second_url, "answer", "3"),
+        ]
+        fetch_result.raw_item_count = 2
+        fetch_result.reached_end = True
+        fetch_result.reconcile()
+        executor = FakeExecutor()
+        with workspace_directory() as directory, patch.object(
+            exporter, "ThreadPoolExecutor", return_value=executor
+        ), patch.object(exporter, "as_completed", side_effect=lambda futures: futures):
+            with self.assertRaises(AuthenticationError):
+                exporter.export_collection_with_integrity(
+                    "Collection",
+                    "https://www.zhihu.com/collection/1",
+                    fetch_result=fetch_result,
+                    output_root=directory,
+                )
+        self.assertEqual(len(executor.futures), 2)
+        self.assertTrue(executor.futures[1].cancelled)
 
     def test_warning_valid_render_is_written_and_persisted(self):
         source = "ABCDEFGHIJKLMNOPQRSTUVWXYZ" * 4

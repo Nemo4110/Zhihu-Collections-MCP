@@ -251,6 +251,7 @@ class EmptyCollectionDeletionTests(unittest.TestCase):
                 mode=ExportMode.BALANCED,
                 fetch_result=result,
                 output_root=directory,
+                allow_deletion_sync=True,
             )
             self.assertEqual(report["status"], "collection_archived")
             self.assertFalse(collection.exists())
@@ -347,6 +348,7 @@ class ExportCollectionArchiveTests(unittest.TestCase):
                 mode=ExportMode.BALANCED,
                 fetch_result=make_not_found_result(),
                 output_root=directory,
+                allow_deletion_sync=True,
                 fetch_snapshot_fn=self.snapshot_fn,
                 render_markdown_fn=self.render_fn,
             )
@@ -357,6 +359,23 @@ class ExportCollectionArchiveTests(unittest.TestCase):
             )
             self.assertEqual(determine_exit_code([report]), 0)
 
+    def test_anonymous_not_found_never_archives_local_directory(self):
+        with workspace_directory() as directory:
+            collection = directory / "我的收藏"
+            collection.mkdir()
+            (collection / "文章.md").write_text("内容", encoding="utf-8")
+            report = export_collection_with_integrity(
+                "我的收藏",
+                "https://www.zhihu.com/collection/777",
+                fetch_result=make_not_found_result(),
+                output_root=directory,
+                allow_deletion_sync=False,
+            )
+            self.assertEqual(report["status"], "collection_incomplete")
+            self.assertEqual(report["issues"][0]["code"], "deletion_unconfirmed")
+            self.assertTrue((collection / "文章.md").exists())
+            self.assertFalse((directory / ".archived.collections").exists())
+
     def test_deleted_collection_without_local_dir(self):
         with workspace_directory() as directory:
             report = export_collection_with_integrity(
@@ -365,6 +384,7 @@ class ExportCollectionArchiveTests(unittest.TestCase):
                 mode=ExportMode.BALANCED,
                 fetch_result=make_not_found_result(),
                 output_root=directory,
+                allow_deletion_sync=True,
             )
             self.assertEqual(report["status"], "collection_archived")
             self.assertIsNone(report["archive_path"])
@@ -383,6 +403,7 @@ class ExportCollectionArchiveTests(unittest.TestCase):
                 mode=ExportMode.AUDIT,
                 fetch_result=make_not_found_result(),
                 output_root=directory,
+                allow_deletion_sync=True,
                 fetch_snapshot_fn=self.snapshot_fn,
                 render_markdown_fn=self.render_fn,
             )
@@ -409,6 +430,7 @@ class ExportCollectionArchiveTests(unittest.TestCase):
                 mode=ExportMode.BALANCED,
                 fetch_result=result,
                 output_root=directory,
+                allow_deletion_sync=True,
             )
             self.assertEqual(report["status"], "collection_incomplete")
             self.assertTrue((collection / "文章.md").exists())
@@ -602,6 +624,7 @@ class ExportRemovedItemsIntegrationTests(unittest.TestCase):
                 mode=ExportMode.BALANCED,
                 fetch_result=make_fetch_result([make_item(self.url_kept, "回答乙", "3")]),
                 output_root=directory,
+                allow_deletion_sync=True,
                 fetch_snapshot_fn=lambda url: make_snapshot(url),
                 render_markdown_fn=lambda snapshot, item: f"> {item.url}\n正文内容",
             )
@@ -612,6 +635,22 @@ class ExportRemovedItemsIntegrationTests(unittest.TestCase):
             self.assertEqual(len(report["archived_items"]), 1)
             self.assertEqual(report["archived_items"][0]["url"], self.url_removed)
             self.assertEqual(determine_exit_code([report]), 0)
+
+    def test_anonymous_removed_item_is_only_reported(self):
+        with workspace_directory() as directory:
+            self._prepare(directory)
+            report = export_collection_with_integrity(
+                "我的收藏",
+                "https://www.zhihu.com/collection/777",
+                fetch_result=make_fetch_result([make_item(self.url_kept, "回答乙", "3")]),
+                output_root=directory,
+                allow_deletion_sync=False,
+                fetch_snapshot_fn=lambda url: make_snapshot(url),
+                render_markdown_fn=lambda snapshot, item: f"> {item.url}\n正文内容",
+            )
+            self.assertTrue((directory / "我的收藏" / "回答甲.md").exists())
+            self.assertFalse((directory / ".archived.items").exists())
+            self.assertEqual(len(report["archivable_items"]), 1)
 
     def test_total_mismatch_defers_item_archival(self):
         """分页对账异常时无法区分「取消收藏」与「隐藏」，本轮不得归档。"""
@@ -625,6 +664,7 @@ class ExportRemovedItemsIntegrationTests(unittest.TestCase):
                     [make_item(self.url_kept, "回答乙", "3")], expected_total=3
                 ),
                 output_root=directory,
+                allow_deletion_sync=True,
                 fetch_snapshot_fn=lambda url: make_snapshot(url),
                 render_markdown_fn=lambda snapshot, item: f"> {item.url}\n正文内容",
             )
@@ -643,6 +683,7 @@ class ExportRemovedItemsIntegrationTests(unittest.TestCase):
                 mode=ExportMode.AUDIT,
                 fetch_result=make_fetch_result([make_item(self.url_kept, "回答乙", "3")]),
                 output_root=directory,
+                allow_deletion_sync=True,
                 fetch_snapshot_fn=lambda url: make_snapshot(url),
                 render_markdown_fn=lambda snapshot, item: f"> {item.url}\n正文内容",
             )

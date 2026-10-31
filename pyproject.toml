@@ -1,0 +1,16 @@
+[project]
+name = "export-zhihu-collections"
+version = "2.3.0"
+description = "将知乎收藏夹导出为带完整性校验的 Obsidian Markdown"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "beautifulsoup4",
+    "lxml",
+    "markdownify",
+    "mcp>=1.0,<2",
+    "requests",
+]
+
+[tool.uv]
+package = false

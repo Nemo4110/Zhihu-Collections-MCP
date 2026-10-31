@@ -21,4 +21,4 @@ six
 soupsieve
 typing_extensions
 urllib3
-mcp
+mcp>=1.0,<2

@@ -30,7 +30,7 @@ from integrity import (
     RunReport,
     validate_markdown,
 )
-from render import prefetch_images, render_markdown
+from render import ImageAssetTracker, image_asset_key, prefetch_images, render_markdown
 from sources import (
     fetch_answer_metadata,
     fetch_article_metadata,
@@ -38,6 +38,7 @@ from sources import (
     fetch_source_snapshot,
 )
 from utils import filter_title_str
+from zhihu_client import AuthenticationError
 
 # 清单写入/保存互斥锁：项级并发导出时保护 manifest.records 与 save() 序列化
 _manifest_lock = threading.Lock()
@@ -232,10 +233,15 @@ def _default_fetch_metadata(item):
     return SourceMetadata(item.url, item.source_type, item.source_id, None)
 
 
-def _default_render_markdown_for(assets_dir):
+def _default_render_markdown_for(assets_dir, asset_tracker=None):
     """构造默认渲染函数：正文前加原始 URL 引用行，资产写入 assets_dir。"""
     def render(snapshot, item):
-        body = render_markdown(snapshot.html, assets_dir, heading_style="ATX")
+        body = render_markdown(
+            snapshot.html,
+            assets_dir,
+            heading_style="ATX",
+            asset_tracker=asset_tracker,
+        )
         return f"> {item.url}\n{body}"
     return render
 
@@ -254,9 +260,19 @@ def export_item_with_integrity(
     collection_path.mkdir(parents=True, exist_ok=True)
     assets_dir = collection_path / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
+    asset_tracker = ImageAssetTracker()
     fetch_metadata_fn = fetch_metadata_fn or _default_fetch_metadata
     fetch_snapshot_fn = fetch_snapshot_fn or fetch_source_snapshot
-    render_markdown_fn = render_markdown_fn or _default_render_markdown_for(assets_dir)
+    render_markdown_fn = render_markdown_fn or _default_render_markdown_for(
+        assets_dir, asset_tracker
+    )
+
+    def image_fields(assets=None):
+        return {
+            "assets": assets or [],
+            "image_activity": asset_tracker.summary(),
+            "image_issues": asset_tracker.issues(),
+        }
 
     record = manifest.records.get(item.url)
     if record and record.get("markdown_path"):
@@ -272,6 +288,8 @@ def export_item_with_integrity(
     else:
         try:
             metadata = fetch_metadata_fn(item)
+        except AuthenticationError:
+            raise
         except Exception as exc:
             return {
                 "name": item.title,
@@ -297,10 +315,13 @@ def export_item_with_integrity(
             "markdown_path": file_path.name,
             "issues": [],
             "warnings": record.get("warnings", []) if record else [],
+            **image_fields(record.get("assets") if record else []),
         }
 
     try:
         snapshot = fetch_snapshot_fn(item.url)
+    except AuthenticationError:
+        raise
     except Exception as exc:
         return {
             "name": item.title,
@@ -340,6 +361,7 @@ def export_item_with_integrity(
                 "text_coverage": existing_result.text_coverage,
                 "issues": [],
                 "warnings": [warning.__dict__ for warning in existing_result.warnings],
+                **image_fields(existing_result.assets),
             }
         if mode == ExportMode.AUDIT:
             issues = existing_result.issues if existing_result else []
@@ -353,14 +375,17 @@ def export_item_with_integrity(
                 "warnings": [
                     warning.__dict__ for warning in (existing_result.warnings if existing_result else [])
                 ],
+                **image_fields(existing_result.assets if existing_result else []),
             }
 
     try:
         # 渲染前并发预取图片：convert_img 命中本地非空文件即不再发请求，
         # 将图片下载从逐张串行改为小线程池并发（图片下载是长文章的主要耗时）。
-        prefetch_images(snapshot.image_urls, assets_dir)
+        prefetch_images(snapshot.image_urls, assets_dir, asset_tracker=asset_tracker)
         rendered = render_markdown_fn(snapshot, item)
         rendered_result = validate_markdown(snapshot, rendered, assets_dir)
+    except AuthenticationError:
+        raise
     except Exception as exc:
         return {
             "name": item.title,
@@ -377,6 +402,7 @@ def export_item_with_integrity(
             "action": action.value,
             "issues": [issue.__dict__ for issue in rendered_result.issues],
             "warnings": [warning.__dict__ for warning in rendered_result.warnings],
+            **image_fields(rendered_result.assets),
         }
 
     atomic_write_text(file_path, rendered)
@@ -390,6 +416,7 @@ def export_item_with_integrity(
             "action": action.value,
             "issues": [issue.__dict__ for issue in final_result.issues],
             "warnings": [warning.__dict__ for warning in final_result.warnings],
+            **image_fields(final_result.assets),
         }
     with _manifest_lock:
         manifest.records[item.url] = record_from_validation(
@@ -414,6 +441,7 @@ def export_item_with_integrity(
         "text_coverage": final_result.text_coverage,
         "issues": [],
         "warnings": [warning.__dict__ for warning in final_result.warnings],
+        **image_fields(final_result.assets),
     }
 
 
@@ -425,6 +453,7 @@ def export_collection_with_integrity(
     output_root=None,
     fetch_snapshot_fn=None,
     render_markdown_fn=None,
+    allow_deletion_sync=False,
 ):
     """Export one collection and persist its manifest after each verified item.
 
@@ -442,6 +471,16 @@ def export_collection_with_integrity(
     root = pathlib.Path(output_root) if output_root else DEFAULT_OUTPUT_ROOT
     if not result.complete:
         if result.not_found:
+            if not allow_deletion_sync:
+                collection_report["status"] = "collection_incomplete"
+                collection_report["issues"] = [{
+                    "code": "deletion_unconfirmed",
+                    "message": "未确认登录身份，收藏夹 404 可能是权限不足；仅报告，不归档",
+                }]
+                logging.warning(
+                    f"收藏夹 {collection_name} 返回 404，匿名模式无法区分删除与权限不足，未归档"
+                )
+                return collection_report
             if mode == ExportMode.AUDIT:
                 # 严格只读审计：仅报告远端已删除，不移动任何文件；
                 # 非 audit 模式（含 --audit --repair）才真正归档。
@@ -484,6 +523,16 @@ def export_collection_with_integrity(
         logging.info(
             f"收藏夹 {collection_name} 存在 total_mismatch，本轮跳过疑似移出条目的归档"
         )
+    elif pending_removed and not allow_deletion_sync:
+        collection_report["archivable_items"] = [
+            {"url": url, "title": manifest.records[url].get("title")}
+            for url in sorted(manifest.records)
+            if url not in current_urls
+        ]
+        if collection_report["archivable_items"]:
+            logging.warning(
+                f"收藏夹 {collection_name} 有疑似移出条目；未确认登录身份，本轮仅报告不归档"
+            )
     elif mode == ExportMode.AUDIT:
         archivable = [
             {"url": url, "title": manifest.records[url].get("title")}
@@ -519,16 +568,23 @@ def export_collection_with_integrity(
                     render_markdown_fn=render_markdown_fn,
                 )
             )
-        for future in as_completed(futures):
-            item_report = future.result()
-            collection_report["items"].append(item_report)
-            try:
-                if item_report.get("url") in manifest.records:
-                    with _manifest_lock:
-                        manifest.save()
-            except OSError as exc:
-                # 同步盘锁定等瞬时故障：清单在下一项完成时会再次落盘，不应让整项/收藏夹失败
-                logging.warning(f"清单保存失败（将在下一项完成时重试）: {exc}")
+        try:
+            for future in as_completed(futures):
+                item_report = future.result()
+                collection_report["items"].append(item_report)
+                try:
+                    if item_report.get("url") in manifest.records:
+                        with _manifest_lock:
+                            manifest.save()
+                except OSError as exc:
+                    # 同步盘锁定等瞬时故障：清单在下一项完成时会再次落盘，不应让整项/收藏夹失败
+                    logging.warning(f"清单保存失败（将在下一项完成时重试）: {exc}")
+        except AuthenticationError as exc:
+            # 已提交但尚未开始的任务不再执行；executor 退出时仅等待已在飞行中的任务。
+            for future in futures:
+                future.cancel()
+            exc.collection_report = collection_report
+            raise
     failures = [
         item for item in collection_report["items"]
         if item["status"] in {
@@ -545,11 +601,19 @@ def export_collection_with_integrity(
         collection_report["status"] = "verified_with_warnings"
     else:
         collection_report["status"] = "verified"
+    image_summary = summarize_collection_reports([collection_report])["images"]
+    if image_summary["remote_fallback"]:
+        logging.warning(
+            f"收藏夹 {collection_name}: {image_summary['remote_fallback']} 张图片"
+            "下载失败并已降级为远程引用（按文章内容 hash 聚合，详情见运行报告）"
+        )
     return collection_report
 
 
 
 def determine_exit_code(collection_reports):
+    if any(report.get("status") == "authentication_failed" for report in collection_reports):
+        return 3
     if any(
         report.get("status") in {"collection_incomplete", "manifest_error", "config_error"}
         or (
@@ -578,13 +642,128 @@ def determine_exit_code(collection_reports):
     return 0
 
 
+def summarize_collection_reports(collection_reports):
+    """从逐项报告生成控制台与 JSON 共用的兼容汇总。"""
+    verified_statuses = {
+        "downloaded", "repaired", "refreshed", "adopted",
+        "audit_verified", "skipped_verified",
+    }
+    failed_statuses = {
+        "invalid", "metadata_failed", "source_failed", "render_failed",
+        "render_invalid", "final_invalid",
+    }
+    items = [
+        item
+        for collection in collection_reports
+        for item in collection.get("items", [])
+    ]
+    image_groups = {}
+    images = {
+        "downloaded": 0,
+        "reused": 0,
+        "verified": 0,
+        "remote_fallback": 0,
+        "missing": 0,
+        "issues": [],
+    }
+    for item in items:
+        activity = item.get("image_activity") or {}
+        images["downloaded"] += int(activity.get("downloaded", 0))
+        images["reused"] += int(activity.get("reused", 0))
+        for asset in item.get("assets") or []:
+            url = asset.get("url") or ""
+            group_key = (
+                item.get("url") or item.get("name") or "",
+                image_asset_key(url) if url else asset.get("filename") or "unknown",
+            )
+            group = image_groups.setdefault(group_key, {
+                "item_title": item.get("name"),
+                "item_url": item.get("url"),
+                "asset_key": group_key[1],
+                "urls": [],
+                "filenames": [],
+                "statuses": set(),
+            })
+            if url and url not in group["urls"]:
+                group["urls"].append(url)
+            filename = asset.get("filename")
+            if filename and filename not in group["filenames"]:
+                group["filenames"].append(filename)
+            group["statuses"].add(asset.get("status") or "unknown")
+
+    for group in image_groups.values():
+        statuses = group["statuses"]
+        if statuses & {"missing", "empty", "unknown"}:
+            status = "missing"
+        elif "remote_fallback" in statuses:
+            status = "remote_fallback"
+        else:
+            status = "verified"
+        images[status] += 1
+        if status != "verified":
+            images["issues"].append({
+                "item_title": group["item_title"],
+                "item_url": group["item_url"],
+                "asset_key": group["asset_key"],
+                "status": status,
+                "urls": group["urls"],
+                "filenames": group["filenames"],
+            })
+
+    return {
+        "authentication_failed": any(
+            report.get("status") == "authentication_failed"
+            for report in collection_reports
+        ),
+        "processed_collections": sum(
+            report.get("status") != "archived_skipped"
+            for report in collection_reports
+        ),
+        "verified": sum(item.get("status") in verified_statuses for item in items),
+        "downloaded": sum(item.get("status") == "downloaded" for item in items),
+        "repaired": sum(item.get("status") == "repaired" for item in items),
+        "refreshed": sum(item.get("status") == "refreshed" for item in items),
+        "unchanged": sum(
+            item.get("status") in {"adopted", "audit_verified", "skipped_verified"}
+            for item in items
+        ),
+        "failed": sum(item.get("status") in failed_statuses for item in items),
+        "unsupported": sum(
+            len(collection.get("collection", {}).get("unsupported_items", []))
+            for collection in collection_reports
+        ),
+        "archived_collections": sum(
+            collection.get("status") == "collection_archived"
+            for collection in collection_reports
+        ),
+        "skipped_archived_collections": sum(
+            collection.get("status") == "archived_skipped"
+            for collection in collection_reports
+        ),
+        "archived_items": sum(
+            len(collection.get("archived_items", []))
+            for collection in collection_reports
+        ),
+        "archivable_items": sum(
+            len(collection.get("archivable_items", []))
+            for collection in collection_reports
+        ),
+        "images": images,
+    }
+
+
 def save_integrity_report(collection_reports, mode, logs_dir=None, timestamp=None):
     """把运行报告写成 JSON；logs_dir 缺省时写到默认输出根的 logs/ 目录。"""
     directory = pathlib.Path(logs_dir) if logs_dir else DEFAULT_OUTPUT_ROOT / "logs"
     directory.mkdir(parents=True, exist_ok=True)
     timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     exit_code = determine_exit_code(collection_reports)
-    report = RunReport(mode=mode, collections=collection_reports, exit_code=exit_code)
+    report = RunReport(
+        mode=mode,
+        collections=collection_reports,
+        exit_code=exit_code,
+        summary=summarize_collection_reports(collection_reports),
+    )
     path = directory / f"integrity_{timestamp}.json"
     atomic_write_json(path, report.to_dict())
     return path

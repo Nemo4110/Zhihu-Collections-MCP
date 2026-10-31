@@ -28,9 +28,22 @@
 适合直接在终端运行导出任务。
 
 #### 安装
+
+推荐使用 [uv](https://docs.astral.sh/uv/) 创建项目 `.venv` 并按 `uv.lock` 安装依赖，不要向 uv 管理的系统 Python 全局安装：
+
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
+
+也可以使用普通虚拟环境和 `requirements.txt`：
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\python.exe -m pip install -r requirements.txt
+# Linux/macOS: .venv/bin/python -m pip install -r requirements.txt
+```
+
+下文使用 `uv run python`；已激活虚拟环境时，可替换为 `python`。
 
 #### 配置文件设置
 
@@ -64,13 +77,13 @@ cp config_examples.json config.json
 
 如果你想自动获取所有收藏夹，可以先运行：
 ```bash
-python fetch_collections.py
+uv run python fetch_collections.py
 ```
 这将自动更新 `config.json` 文件中的收藏夹列表。
 
 #### 运行主程序
 ```bash
-python main.py
+uv run python main.py
 ```
 
 ---
@@ -80,15 +93,13 @@ python main.py
 适合被 Claude Code 或其他 AI 工具集成调用。
 
 #### 安装 MCP 依赖
-```bash
-# 安装MCP包
-pip install mcp
-```
+
+运行 `uv sync` 已包含兼容的 MCP 1.x 依赖，无需单独安装。
 
 #### 启动 MCP Server
 
 ```bash
-python mcp_server.py
+uv run python mcp_server.py
 ```
 
 Server 会通过 stdio 通信，可以在 Claude Code 或其他 MCP 客户端中使用。
@@ -142,8 +153,8 @@ export_collection(
 {
   "mcpServers": {
     "zhihu-collections": {
-      "command": "python",
-      "args": ["mcp_server.py"],
+      "command": "uv",
+      "args": ["run", "python", "mcp_server.py"],
       "env": {},
       "cwd": "你的项目路径"
     }
@@ -182,6 +193,13 @@ export_collection(
 ]
 ```
 
+每次 CLI/MCP 网络导出都会先通过 `/api/v4/me` 做认证预检：
+
+- 显式配置了 `cookies.json` 或 `ZHIHU_COOKIES_FILE` 时，Cookie 失效、缺少用户身份或无法完成预检会停止运行，退出码为 `3`，不会写入正文、修改清单或执行归档。
+- 认证预检的 `401` 表示登录失效；`403`、网络错误和服务端错误只表示“无法确认”，不会武断报告为 Cookie 过期。普通正文/网页请求的 `403` 仍按限流或权限问题处理。
+- 完全未配置 Cookie 时保留匿名公开导出；匿名模式无法区分“收藏夹已删除”和“私密资源不可见”，因此远端删除与疑似移出条目只报告，不归档。
+- 日志和运行报告不记录 Cookie 名称或值。
+
 
 ## 导出完整性校验
 
@@ -190,7 +208,7 @@ export_collection(
 ### 默认平衡模式
 
 ```bash
-python main.py
+uv run python main.py
 ```
 
 默认模式会完整核对收藏夹分页。收藏夹分页响应自带每项内容的更新时间（与回答/专栏 API 同源同值），已有清单且该时间戳未变化、本地哈希及图片均正常的回答会零网络请求快速跳过；缺少清单、源内容已更新、本地文件被修改或图片缺失时会重新验证并按需修复。
@@ -198,7 +216,7 @@ python main.py
 ### 严格只读审计
 
 ```bash
-python main.py --audit
+uv run python main.py --audit
 ```
 
 严格重新获取所有支持内容，检查：
@@ -218,7 +236,7 @@ python main.py --audit
 ### 审计并修复
 
 ```bash
-python main.py --audit --repair
+uv run python main.py --audit --repair
 ```
 
 只重写严格审计判定无效的文件，并在最终文件再次通过验证后更新清单。
@@ -226,7 +244,7 @@ python main.py --audit --repair
 ### 强制刷新
 
 ```bash
-python main.py --force
+uv run python main.py --force
 ```
 
 重新下载全部支持的回答和专栏，采用临时文件、`fsync` 和原子替换写入，避免中断时破坏上一份有效 Markdown。
@@ -235,12 +253,13 @@ python main.py --force
 
 工具采用“只增不删”的本地模型，远端删除不会直接丢弃本地文件，而是归档：
 
-- **收藏夹被删除**：两种判定信号。其一，收藏夹 API 第一页即返回 404 且从未取到任何数据；其二，分页返回空列表（知乎对已删除夹子的 items API 仍返回 200 + totals=0），此时再请求元信息 API `/api/v4/collections/{id}`，返回 404 判为已删除，返回 200 则是新建空夹，其他错误不判定（网络错误、5xx、分页中途失败都不会误判）。命中时整个收藏夹目录（含 Markdown、图片与 `.zhihu-integrity.json`）移动到输出目录下的 `.archived.collections/<收藏夹名>/`，同名冲突自动加序号后缀；收藏夹状态记为 `collection_archived`，不算失败（退出码 0），并回写 `config.json` 标记 `status: archived`，下次运行直接跳过。重跑 `python fetch_collections.py` 重建列表可清除标记。
+- **收藏夹被删除**：两种判定信号。其一，收藏夹 API 第一页即返回 404 且从未取到任何数据；其二，分页返回空列表（知乎对已删除夹子的 items API 仍返回 200 + totals=0），此时再请求元信息 API `/api/v4/collections/{id}`，返回 404 判为已删除，返回 200 则是新建空夹，其他错误不判定（网络错误、5xx、分页中途失败都不会误判）。命中时整个收藏夹目录（含 Markdown、图片与 `.zhihu-integrity.json`）移动到输出目录下的 `.archived.collections/<收藏夹名>/`，同名冲突自动加序号后缀；收藏夹状态记为 `collection_archived`，不算失败（退出码 0），并回写 `config.json` 标记 `status: archived`，下次运行直接跳过。重跑 `uv run python fetch_collections.py` 重建列表可清除标记。
 - **条目被移出收藏夹（如手动取消收藏）**：仅在收藏夹分页完整时执行。完整性清单中已不在本轮收藏夹列表里的条目，其 Markdown 与引用的图片会移动到 `.archived.items/<收藏夹名>/`（保持 `md + assets/` 相对结构，链接继续有效），清单记录同步移除；被其余保留条目共享的图片复制而非移动。每次归档都会追加到该归档目录的 `.archived-manifest.json`。
 - **内容获取不到**（条目仍在列表中但正文已删/被隐藏）：仍按原有逻辑处理，正文抓取失败记 `source_failed`（退出码 1），或仅总数对不上时记 `total_mismatch`（`verified_with_warnings`）。
 - **total_mismatch 时延迟归档**：分页对账不上的收藏夹（隐藏/失效条目仍计入 totals）中，疑似移出的条目本轮不归档也不报告，因为无法区分「用户取消收藏」与「暂时不可见」，待 totals 恢复一致后的下一次运行再同步。
 - 收藏夹 API 返回 404 时不再重试退避（确定性失败），已删除收藏夹不会拖慢每次运行。
 - `--audit` 严格只读模式下不动任何文件，只在报告中列出 `archivable_items` 供人工确认。
+- 只有认证预检确认登录身份后才允许实际归档；匿名模式的 404 和疑似移出条目仅报告，避免把权限不足误当删除。
 
 ### 完整性报告
 
@@ -250,11 +269,14 @@ python main.py --force
 logs/integrity_YYYYMMDD_HHMMSS.json
 ```
 
+报告新增 `summary` 字段，与控制台共用同一汇总逻辑，包含新下载、修复、刷新、未变化、失败、不支持、归档条目，以及图片下载、复用、本地完整和远程降级数量。逐项报告的 `assets` 保留图片 URL、文件名和状态；`summary.images.issues` 按“文章 + 知乎图片内容 hash”归并不同尺寸 URL，避免同一失效图片反复告警。预取阶段的瞬时失败只在 DEBUG 日志记录，最终仍为 `remote_fallback` 时才形成用户级警告。
+
 退出码：
 
 - `0`：所有支持内容验证通过；允许 `verified_with_warnings` 以及已明确报告的 `pin`/想法等暂不支持类型；
 - `1`：回答或专栏下载、转换、硬性文本完整性或图片校验失败；
-- `2`：配置、命令参数、清单版本或收藏夹分页完整性失败。
+- `2`：配置、命令参数、清单版本或收藏夹分页完整性失败；
+- `3`：Cookie 已失效或认证预检无法确认登录状态；为安全起见停止后续导出与归档。
 
 ### 在隔离 worktree 中引用 Cookie
 
@@ -262,7 +284,7 @@ logs/integrity_YYYYMMDD_HHMMSS.json
 
 ```bash
 export ZHIHU_COOKIES_FILE=/path/to/cookies.json
-python main.py --audit
+uv run python main.py --audit
 ```
 
 程序只读取 Cookie，不会将 Cookie 名称和值写入完整性清单或报告。

@@ -3,6 +3,7 @@ import json
 import unittest
 
 import sources
+from zhihu_client import AuthenticationError
 from integrity import (
     SourceContentError,
     SourceMetadata,
@@ -86,6 +87,16 @@ class SourceCandidateTests(unittest.TestCase):
 
         with self.assertRaises(SourceContentError):
             sources.fetch_source_snapshot(url, request_get=request_get)
+
+    def test_authentication_error_bypasses_candidate_fallback(self):
+        def request_get(url, **kwargs):
+            raise AuthenticationError("HTTP 401")
+
+        with self.assertRaises(AuthenticationError):
+            sources.fetch_source_snapshot(
+                "https://www.zhihu.com/question/1/answer/2",
+                request_get=request_get,
+            )
 
     def test_answer_page_initial_json_can_beat_short_visible_container(self):
         payload = {

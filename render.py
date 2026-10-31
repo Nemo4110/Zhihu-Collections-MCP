@@ -7,9 +7,11 @@
 """
 import logging
 import os
+import re
+import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from markdownify import MarkdownConverter
 
@@ -25,11 +27,77 @@ from zhihu_client import ZhihuClient, default_client
 IMAGE_PREFETCH_WORKERS = 4
 
 
+def image_asset_key(url):
+    """按知乎内容 hash 归并尺寸变体；其他图片沿用本地文件名语义。"""
+    match = re.search(r"v2-[0-9a-fA-F]+", urlsplit(url).path)
+    return match.group(0).lower() if match else image_filename_from_url(url)
+
+
+class ImageAssetTracker:
+    """单篇文章的图片活动收集器；预取线程与渲染线程共享，内部互斥。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._activity = {}
+        self._failures = {}
+
+    def _urls(self, table, key, url):
+        entry = table.setdefault(key, {"urls": []})
+        if url not in entry["urls"]:
+            entry["urls"].append(url)
+        return entry
+
+    def record_downloaded(self, url):
+        key = image_asset_key(url)
+        with self._lock:
+            self._urls(self._activity, key, url)["status"] = "downloaded"
+            self._failures.pop(key, None)
+
+    def record_reused(self, url):
+        key = image_asset_key(url)
+        with self._lock:
+            entry = self._urls(self._activity, key, url)
+            if entry.get("status") != "downloaded":
+                entry["status"] = "reused"
+            self._failures.pop(key, None)
+
+    def record_failure(self, url, error):
+        key = image_asset_key(url)
+        with self._lock:
+            entry = self._urls(self._failures, key, url)
+            entry.update({
+                "asset_key": key,
+                "status": "remote_fallback",
+                "message": str(error),
+            })
+
+    def summary(self):
+        with self._lock:
+            return {
+                "downloaded": sum(
+                    entry.get("status") == "downloaded" for entry in self._activity.values()
+                ),
+                "reused": sum(
+                    entry.get("status") == "reused" for entry in self._activity.values()
+                ),
+            }
+
+    def issues(self):
+        with self._lock:
+            return [dict(entry, urls=list(entry["urls"])) for entry in self._failures.values()]
+
+
 def _asset_file_ready(path):
     return os.path.exists(path) and os.path.getsize(path) > 0
 
 
-def prefetch_images(image_urls, assets_dir, request_get=None, max_workers=IMAGE_PREFETCH_WORKERS):
+def prefetch_images(
+    image_urls,
+    assets_dir,
+    request_get=None,
+    max_workers=IMAGE_PREFETCH_WORKERS,
+    asset_tracker=None,
+):
     """渲染前并发预取图片到 assets 目录。
 
     本地已有同名非空文件时跳过（zhimg 图片 URL 含内容 hash，内容更新会换 URL），
@@ -43,6 +111,8 @@ def prefetch_images(image_urls, assets_dir, request_get=None, max_workers=IMAGE_
         seen.add(url)
         target_path = os.path.join(assets_dir, image_filename_from_url(url))
         if _asset_file_ready(target_path):
+            if asset_tracker is not None:
+                asset_tracker.record_reused(url)
             continue
         targets.append((url, target_path))
     if not targets:
@@ -59,8 +129,11 @@ def prefetch_images(image_urls, assets_dir, request_get=None, max_workers=IMAGE_
             content = client.download(url)
             with open(target_path, 'wb') as fp:
                 fp.write(content)
+            if asset_tracker is not None:
+                asset_tracker.record_downloaded(url)
         except OSError as exc:  # 含 requests.RequestException（IOError 子类）
-            logging.warning(f"图片预取失败，渲染时重试: {url}: {exc}")
+            # 预取只是优化；最终渲染是否降级由 convert_img 统一记录。
+            logging.debug(f"图片预取失败，渲染时重试: {url}: {exc}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         list(pool.map(_fetch, targets))
@@ -121,21 +194,28 @@ class ObsidianStyleConverter(MarkdownConverter):
 
             img_content_name = image_filename_from_url(src)
             imgPath = os.path.join(assetsDir, img_content_name)
+            tracker = self.options.get('asset_tracker')
             # 预取阶段已下载或历史渲染留下的非空文件直接复用（图片 URL 含内容 hash）
             if not _asset_file_ready(imgPath):
                 try:
                     img_content = self.options['client'].download(src)
                     with open(imgPath, 'wb') as fp:
                         fp.write(img_content)
+                    if tracker is not None:
+                        tracker.record_downloaded(src)
                 except OSError as exc:
                     if not _asset_file_ready(imgPath):
                         # 远端资源已失效（如 404 死链）时降级为远程引用，保证正文完整导出；
                         # 该项记为 warning，下次运行会自动重试，远端恢复后升级为本地备份。
-                        logging.warning(f"图片下载失败，降级为远程引用: {src}: {exc}")
+                        if tracker is not None:
+                            tracker.record_failure(src, exc)
+                        logging.debug(f"图片下载失败，降级为远程引用: {src}: {exc}")
                         escaped_alt = alt.replace('\n', ' ').replace(']', r'\]')
                         return f"![{escaped_alt}]({src})"
                     logging.warning(f"图片下载失败，复用已有资源: {src}")
 
+            if tracker is not None:
+                tracker.record_reused(src)
             escaped_alt = alt.replace('\n', ' ').replace(']', r'\]')
             asset_path = quote(f"assets/{img_content_name}", safe="/-._~")
             result = f"![{escaped_alt}]({asset_path})"
@@ -236,12 +316,14 @@ class ObsidianStyleConverter(MarkdownConverter):
 class Renderer:
     """快照 HTML → Markdown 渲染器；资产落盘到 assets_dir，下载经 client。"""
 
-    def __init__(self, assets_dir, client=None):
+    def __init__(self, assets_dir, client=None, asset_tracker=None):
         self.assets_dir = assets_dir
         self.client = client if client is not None else default_client()
+        self.asset_tracker = asset_tracker
 
     def render(self, html, **options):
         options.setdefault('heading_style', 'ATX')
+        options.setdefault('asset_tracker', self.asset_tracker)
         converter = ObsidianStyleConverter(
             assets_dir=self.assets_dir,
             client=self.client,
@@ -250,6 +332,8 @@ class Renderer:
         return converter.convert(html)
 
 
-def render_markdown(html, assets_dir, client=None, **options):
+def render_markdown(html, assets_dir, client=None, asset_tracker=None, **options):
     """一次性渲染便捷函数；多次渲染同一目录时优先复用 Renderer 实例。"""
-    return Renderer(assets_dir, client=client).render(html, **options)
+    return Renderer(
+        assets_dir, client=client, asset_tracker=asset_tracker
+    ).render(html, **options)

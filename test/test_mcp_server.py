@@ -11,6 +11,18 @@ from unittest.mock import patch
 
 import mcp_server
 from integrity import CollectionFetchResult, CollectionItem
+from zhihu_client import AuthenticationError, AuthenticationStatus
+
+
+class MCPTestCase(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(
+            mcp_server,
+            "preflight_authentication",
+            return_value=AuthenticationStatus(authenticated=True),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 def make_fetch_result():
@@ -41,7 +53,7 @@ def run(coro):
     return asyncio.run(coro)
 
 
-class ExportCollectionHandlerTests(unittest.TestCase):
+class ExportCollectionHandlerTests(MCPTestCase):
     def test_routes_to_integrity_pipeline_with_explicit_output_root(self):
         report = {"name": "收藏", "status": "verified", "items": []}
         with patch.object(
@@ -78,9 +90,19 @@ class ExportCollectionHandlerTests(unittest.TestCase):
                 )
             )[0].text
         self.assertIn("boom", text)
+    def test_expired_cookie_prevents_export(self):
+        with patch.object(
+            mcp_server, "preflight_authentication",
+            side_effect=AuthenticationError("Cookie 已失效"),
+        ), patch.object(mcp_server.exporter, "export_collection_with_integrity") as export:
+            text = run(mcp_server.export_collection_handler({
+                "collection_url": "https://www.zhihu.com/collection/123"
+            }))[0].text
+        self.assertIn("认证预检失败", text)
+        export.assert_not_called()
 
 
-class GetCollectionInfoHandlerTests(unittest.TestCase):
+class GetCollectionInfoHandlerTests(MCPTestCase):
     def test_reports_item_count_and_titles_from_fetch_result(self):
         with patch.object(
             mcp_server.sources, "fetch_collection_items", return_value=make_fetch_result()
@@ -99,7 +121,7 @@ class GetCollectionInfoHandlerTests(unittest.TestCase):
         self.assertIn("collection_url", text)
 
 
-class CallToolDispatchTests(unittest.TestCase):
+class CallToolDispatchTests(MCPTestCase):
     def test_unknown_tool_is_reported(self):
         text = run(mcp_server.call_tool("nope", {}))[0].text
         self.assertIn("未知工具", text)

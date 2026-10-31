@@ -6,9 +6,31 @@
 requests 传输，测试注入假传输。页面请求与 API 请求的头部差异是
 知乎的反爬语义，由本模块统一持有，调用方无需处理头部。
 """
+import os
 import time
+from dataclasses import dataclass
+from pathlib import Path
 
 import requests
+
+ME_API_URL = "https://www.zhihu.com/api/v4/me"
+
+
+class AuthenticationError(RuntimeError):
+    """知乎登录状态已失效，继续导出或归档不再安全。"""
+
+
+class AuthenticationCheckError(RuntimeError):
+    """因限流、网络或服务端错误，无法确认登录状态。"""
+
+
+@dataclass(frozen=True)
+class AuthenticationStatus:
+    authenticated: bool
+
+    @property
+    def anonymous(self):
+        return not self.authenticated
 
 # 页面请求的 headers（HTML 文档）
 PAGE_HEADERS = {
@@ -49,16 +71,59 @@ def default_client():
     global _default_instance
     if _default_instance is None:
         from paths_config import load_cookies
-        _default_instance = ZhihuClient(cookies=load_cookies())
+        configured_path = os.environ.get("ZHIHU_COOKIES_FILE")
+        cookie_path = Path(configured_path or "cookies.json")
+        _default_instance = ZhihuClient(
+            cookies=load_cookies(),
+            auth_configured=bool(configured_path) or cookie_path.exists(),
+        )
     return _default_instance
+
+
+def preflight_authentication(client=None):
+    """在写入前确认显式配置的 Cookie 有效；未配置时保留匿名模式。"""
+    client = client or default_client()
+    if not client.auth_configured:
+        return AuthenticationStatus(authenticated=False)
+    try:
+        payload = client.get_api(ME_API_URL, timeout=15)
+    except AuthenticationError:
+        raise
+    except requests.HTTPError as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 403:
+            raise AuthenticationCheckError(
+                "无法确认 Cookie 是否有效：知乎拒绝了认证预检（HTTP 403，可能是限流）"
+            ) from exc
+        raise AuthenticationCheckError(
+            f"无法确认 Cookie 是否有效：认证预检返回 HTTP {status or '未知错误'}"
+        ) from exc
+    except (requests.RequestException, ValueError) as exc:
+        raise AuthenticationCheckError(
+            "无法确认 Cookie 是否有效：认证预检网络请求或响应解析失败"
+        ) from exc
+    if not isinstance(payload, dict) or not payload.get("url_token"):
+        raise AuthenticationError("Cookie 已失效或当前未登录，请更新 cookies.json 后重试")
+    return AuthenticationStatus(authenticated=True)
+
+
+def _raise_for_status(response):
+    """把明确的 401 转为认证异常；403 仍由调用方按限流/权限处理。"""
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        if getattr(response, "status_code", None) == 401:
+            raise AuthenticationError("知乎登录状态已失效（HTTP 401），请更新 Cookie") from exc
+        raise
 
 
 class ZhihuClient:
     """知乎 HTTP 访问的唯一入口：注入传输与 Cookie，隐藏头部与重试。"""
 
-    def __init__(self, transport=None, cookies=None, sleep=time.sleep):
+    def __init__(self, transport=None, cookies=None, sleep=time.sleep, auth_configured=None):
         self._transport = transport or requests.get
         self.cookies = cookies if cookies is not None else {}
+        self.auth_configured = bool(self.cookies) if auth_configured is None else auth_configured
         self._sleep = sleep
 
     def get_api(self, url, timeout=30):
@@ -69,7 +134,7 @@ class ZhihuClient:
             cookies=self.cookies,
             timeout=timeout,
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     def get_page_data(self, url, timeout=30):
@@ -84,7 +149,7 @@ class ZhihuClient:
             cookies=self.cookies,
             timeout=timeout,
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     def get_page(self, url, timeout=30):
@@ -95,7 +160,7 @@ class ZhihuClient:
             cookies=self.cookies,
             timeout=timeout,
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.text
 
     def download(self, url, attempts=3, timeout=30):
@@ -109,7 +174,7 @@ class ZhihuClient:
                     cookies=self.cookies,
                     timeout=timeout,
                 )
-                response.raise_for_status()
+                _raise_for_status(response)
                 return response.content
             except requests.RequestException as exc:
                 last_error = exc

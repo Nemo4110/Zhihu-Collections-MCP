@@ -127,7 +127,8 @@ def mark_collections_archived(config_file, urls, archived_at=None):
 
 
 def load_cookies(cookie_file=None):
-    """加载知乎会话 Cookie；文件缺失或格式错误时返回空 dict（匿名模式）。"""
+    """加载知乎会话 Cookie；是否允许匿名继续由认证预检统一判定。"""
+    explicitly_configured = bool(cookie_file or os.environ.get("ZHIHU_COOKIES_FILE"))
     cookie_path = pathlib.Path(
         cookie_file or os.environ.get("ZHIHU_COOKIES_FILE", "cookies.json")
     )
@@ -139,8 +140,11 @@ def load_cookies(cookie_file=None):
             cookies_dict[cookie['name']] = cookie['value']
         return cookies_dict
     except FileNotFoundError:
-        print("未找到cookies.json文件，将使用无登录模式访问（部分内容可能无法获取）")
+        if explicitly_configured:
+            print("指定的 Cookie 文件不存在，无法使用登录模式")
+        else:
+            print("未找到cookies.json文件，将使用无登录模式访问（部分内容可能无法获取）")
         return {}
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
-        print(f"cookies文件格式无效，将使用无登录模式访问: {exc}")
+        print(f"cookies文件格式无效，无法使用登录模式: {exc}")
         return {}

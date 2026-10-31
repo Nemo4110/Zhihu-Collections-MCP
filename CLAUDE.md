@@ -14,13 +14,13 @@ Export-Zhihu-Collections 是一个将知乎收藏夹导出为 Markdown 格式的
 
 ### 主要架构（深模块分层）
 - **cli.py**: 命令行装配层（参数解析、配置加载、日志装配、输出根解析），导入零副作用
-- **exporter.py**: 导出引擎深模块：`export_item_with_integrity()`（单项 verify/adopt/repair/refresh）、`export_collection_with_integrity()`（收藏夹级并发导出 + 清单落盘，`output_root` 显式注入）、`determine_exit_code()`、`save_integrity_report()`
+- **exporter.py**: 导出引擎深模块：`export_item_with_integrity()`（单项 verify/adopt/repair/refresh）、`export_collection_with_integrity()`（收藏夹级并发导出 + 清单落盘，`output_root` 与删除同步安全开关显式注入）、`determine_exit_code()`、`summarize_collection_reports()`（控制台/JSON 共用汇总）、`save_integrity_report()`
 - **sources.py**: 知乎源数据抓取层：`fetch_collection_items()`（分页对账）、`fetch_answer_snapshots()` / `fetch_article_snapshots()`（API/网页双候选）、`fetch_source_snapshot()`、网页候选熔断状态
-- **render.py**: 渲染模块：`Renderer` / `render_markdown()`（快照 HTML → Obsidian Markdown，公式转 LaTeX）、`prefetch_images()`（并发预取）；assets_dir 与 client 显式注入，无全局状态
-- **zhihu_client.py**: 知乎 HTTP 边界适配器：`ZhihuClient`（`get_api` / `get_page` / `get_page_data` / `download`）持有头部策略与重试退避；`default_client()` 情性加载一次 Cookie
+- **render.py**: 渲染模块：`Renderer` / `render_markdown()`（快照 HTML → Obsidian Markdown，公式转 LaTeX）、`prefetch_images()`（并发预取）、`ImageAssetTracker`（单项下载/复用/降级统计）；assets_dir、client 与 tracker 显式注入，无全局状态
+- **zhihu_client.py**: 知乎 HTTP 边界适配器：`ZhihuClient`（`get_api` / `get_page` / `get_page_data` / `download`）持有头部策略与重试退避；`default_client()` 惰性加载一次 Cookie；`preflight_authentication()` 在写入前验证登录状态，`AuthenticationError` 穿透重试与候选回退
 - **integrity.py**: 导出完整性核心模块（纯逻辑），负责规范 URL、源内容/Markdown 哈希、公式与图片的对称文本归一化、分段相似度覆盖率、警告分级、图片清单、原子写入、完整性清单、刷新策略和运行报告
 - **paths_config.py**: 配置与跨平台路径模块：`load_config()` / `parse_output_path()` / `load_cookies()` / `get_current_os()`，路径参数可注入
-- **main.py**: 向后兼容的 CLI 入口 shim（`python main.py` 用法不变）
+- **main.py**: 向后兼容的 CLI 入口 shim（激活虚拟环境后 `python main.py` 用法不变）
 - **fetch_collections.py**: 独立的收藏夹获取脚本（复用 paths_config）
 - **mcp_server.py**: MCP 服务，直接接 exporter/sources 深模块接口（导出走完整性管线）
 - **utils.py**: 包含用于文件名清理的 `filter_title_str()` 函数
@@ -32,8 +32,9 @@ Export-Zhihu-Collections 是一个将知乎收藏夹导出为 Markdown 格式的
 
 ### 数据流程
 1. 加载配置文件 (config.json 或 zhihuUrls.json)
-2. 解析和验证输出路径，支持多种操作系统格式
-3. 批量处理多个收藏夹：
+2. 解析和验证输出路径，支持多种操作系统格式，只初始化一次日志
+3. 通过 `/api/v4/me` 预检显式配置的 Cookie；失效或无法确认时返回 3，不写正文/清单、不归档
+4. 批量处理多个收藏夹：
    - 解析收藏夹 URL 提取收藏夹 ID
    - 使用知乎 API 获取收藏夹中的所有项目（分页处理，使用 offset/limit）
    - 对每个项目，判断类型（回答或文章）并获取内容
@@ -41,45 +42,52 @@ Export-Zhihu-Collections 是一个将知乎收藏夹导出为 Markdown 格式的
    - 使用自定义转换器将 HTML 转换为 Markdown
    - 下载并保存图片到 assets 文件夹
    - 使用清理后的文件名保存 Markdown 文件
-4. 生成详细的处理日志并保存到 logs 目录
-
+5. 生成详细的处理日志、统一汇总与完整性报告，保存到 logs 目录
 ## 常用命令
 
 ### 安装和设置
 ```bash
-# 安装依赖
-pip install -r requirements.txt
+# 推荐：按 pyproject.toml 与 uv.lock 创建项目 .venv
+uv sync
+
+# 兼容：普通虚拟环境中安装 requirements.txt
+python -m pip install -r requirements.txt
 ```
 
+
+### 测试
+```bash
+uv run python -m unittest discover -s test -p "test_*.py"
+```
 
 ### 完整性模式
 ```bash
 # 平衡模式：只刷新远端更新、本地异常或尚未建立清单的内容
-python main.py
+uv run python main.py
 
 # 严格只读审计
-python main.py --audit
+uv run python main.py --audit
 
 # 严格审计并自动修复
-python main.py --audit --repair
+uv run python main.py --audit --repair
 
 # 强制刷新全部支持内容
-python main.py --force
+uv run python main.py --force
 
 # 跳过回答网页候选抓取，仅用 API 候选校验（网页请求易被知乎限流 403）
-python main.py --no-page-candidates
+uv run python main.py --no-page-candidates
 
 # 急切抓取网页候选（默认仅当 API 候选失败时才尝试网页候选）
-python main.py --page-candidates
+uv run python main.py --page-candidates
 ```
 
 回答校验默认懒升级：优先使用 API 候选，仅当 API 候选失败/缺失时才抓取网页候选（`--page-candidates` 可恢复急切双候选模式）；网页候选连续失败 5 次（`PAGE_CANDIDATE_FAILURE_LIMIT`，疑似限流累积）后自动熔断，本次运行剩余项目仅用 API 候选校验。进度与日志统一通过 `logging` 输出（不使用 tqdm），格式为 `时间 - 级别 - [文件名:行号] - 消息`，每项内容一行进度（`校验 <收藏夹> [i/N]: 标题`）。
 
-每个收藏夹目录包含 `.zhihu-integrity.json`；每次运行在输出目录的 `logs/` 下生成 `integrity_*.json`。文本覆盖率 `0.90-0.98` 且无硬错误时记录为 `verified_with_warnings`，不导致非零退出码；硬性支持内容验证失败返回 1，配置/分页/清单结构失败返回 2。`pin`/想法会明确报告为不支持类型，但不会导致其他回答和专栏失败。专栏正文优先使用 `zhuanlan.zhihu.com/api/articles/{id}`，失败后回退网页解析；图片下载有三次有界重试并可复用已有非空资源。 收藏夹分页遵循 `paging.next/is_end`，项目总数直接取自第一页响应的 `paging.totals`（缺失时回退独立总数请求）；已到末页但 API 报告总数大于可见项目数时记录 `total_mismatch` 和收藏夹 warning，不重复边界条目。
+每个收藏夹目录包含 `.zhihu-integrity.json`；每次运行在输出目录的 `logs/` 下生成 `integrity_*.json`，报告 `summary` 与 CLI 控制台统一由 `summarize_collection_reports()` 生成。文本覆盖率 `0.90-0.98` 且无硬错误时记录为 `verified_with_warnings`，不导致非零退出码；硬性支持内容验证失败返回 1，配置/分页/清单结构失败返回 2，Cookie 失效或认证预检无法确认返回 3。`pin`/想法会明确报告为不支持类型，但不会导致其他回答和专栏失败。专栏正文优先使用 `zhuanlan.zhihu.com/api/articles/{id}`，失败后回退网页解析；图片下载有三次有界重试并可复用已有非空资源。 收藏夹分页遵循 `paging.next/is_end`，项目总数直接取自第一页响应的 `paging.totals`（缺失时回退独立总数请求）；已到末页但 API 报告总数大于可见项目数时记录 `total_mismatch` 和收藏夹 warning，不重复边界条目。
 
-导出为项级并发（`ITEM_EXPORT_WORKERS`，默认 3），清单读写通过 `_manifest_lock` 互斥并在每项完成后落盘；图片在渲染前按 URL 并发预取（`IMAGE_PREFETCH_WORKERS`，默认 4，公式 URL 转公式不下载），本地已有同名非空资源（zhimg URL 含内容 hash）时直接复用不再请求。
+导出为项级并发（`ITEM_EXPORT_WORKERS`，默认 3），清单读写通过 `_manifest_lock` 互斥并在每项完成后落盘；认证异常取消尚未开始的任务并停止后续收藏夹。图片在渲染前按 URL 并发预取（`IMAGE_PREFETCH_WORKERS`，默认 4，公式 URL 转公式不下载），本地已有同名非空资源（zhimg URL 含内容 hash）时直接复用不再请求；预取失败仅记 DEBUG，最终远程降级按“文章 + 内容 hash”聚合到报告。
 
-远端删除同步采用归档而非删除本地文件：收藏夹已删除时判定 `not_found`（第一页即 404 且从未取到数据，或分页空列表但元信息 API `/api/v4/collections/{id}` 确认 404——知乎对已删除夹子的 items API 仍返回 200+空；网络错误/5xx/分页中途失败/元信息非 404 均不误判，404 不重试退避），整个收藏夹目录移入输出根的 `.archived.collections/<收藏夹名>/`，状态 `collection_archived` 不计入退出码（cli 汇总打印归档数并回写 config.json 的 `status: archived` 标记，下次运行跳过这些夹子）；分页完整且对账一致时，清单中已不在收藏夹列表的条目（如手动取消收藏）其 Markdown 与图片移入 `.archived.items/<收藏夹名>/`（共享图片复制而非移动），清单记录同步移除，归档历史经 `integrity.append_archived_items_manifest` 写入该目录的 `.archived-manifest.json`；存在 `total_mismatch` 时本轮不归档（无法区分取消收藏与隐藏）；`--audit` 只读模式不动文件仅报告 `archivable_items`；条目仍在列表但正文取不到时仍按 `source_failed`/`total_mismatch` 原有逻辑处理。
+远端删除同步采用归档而非删除本地文件：收藏夹已删除时判定 `not_found`（第一页即 404 且从未取到数据，或分页空列表但元信息 API `/api/v4/collections/{id}` 确认 404——知乎对已删除夹子的 items API 仍返回 200+空；网络错误/5xx/分页中途失败/元信息非 404 均不误判，404 不重试退避），整个收藏夹目录移入输出根的 `.archived.collections/<收藏夹名>/`，状态 `collection_archived` 不计入退出码（cli 汇总打印归档数并回写 config.json 的 `status: archived` 标记，下次运行跳过这些夹子）；分页完整且对账一致时，清单中已不在收藏夹列表的条目（如手动取消收藏）其 Markdown 与图片移入 `.archived.items/<收藏夹名>/`（共享图片复制而非移动），清单记录同步移除，归档历史经 `integrity.append_archived_items_manifest` 写入该目录的 `.archived-manifest.json`；存在 `total_mismatch` 时本轮不归档（无法区分取消收藏与隐藏）；`--audit` 只读模式不动文件仅报告 `archivable_items`；条目仍在列表但正文取不到时仍按 `source_failed`/`total_mismatch` 原有逻辑处理。只有预检确认登录身份的 CLI/MCP 导出才传入 `allow_deletion_sync=True`；匿名模式仅报告 `archivable_items`/`deletion_unconfirmed`，不移动文件。
 
 隔离 worktree 可通过 `ZHIHU_COOKIES_FILE` 引用主检出中被忽略的 Cookie 文件，禁止将 Cookie 内容写入代码、测试、日志或 Git。
 
@@ -90,7 +98,7 @@ cp config_examples.json config.json
 # 编辑 config.json，添加你的收藏夹信息
 
 # 2. 运行导出工具（批量处理）
-python main.py
+uv run python main.py
 
 # 对于私密收藏夹，确保根目录下存在 cookies.json 文件
 ```
@@ -131,7 +139,9 @@ python main.py
 ├── utils.py             # 工具函数
 ├── mcp_server.py        # MCP 服务（接深模块接口）
 ├── fetch_collections.py # 独立的收藏夹获取脚本
-├── requirements.txt     # Python 依赖
+├── requirements.txt     # 普通 venv/pip 兼容依赖
+├── pyproject.toml       # 项目元数据与直接运行依赖
+├── uv.lock              # uv 可复现依赖锁
 ├── config.json          # 主配置文件
 ├── config_examples.json # 配置示例文件
 ├── zhihuUrls.json       # 旧版URL列表（向后兼容）
@@ -156,7 +166,7 @@ python main.py
 ]
 ```
 
-如果 cookies 不可用，工具会优雅地回退到未认证模式。
+只有完全未配置 Cookie 时才使用匿名公开导出；显式配置但失效、格式错误或无法完成预检时停止并返回 3，不静默降级。禁止把 Cookie 名称或值写入日志、清单和报告。
 
 ## 功能特性
 

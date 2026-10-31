@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import json
 import shutil
 import unittest
 import uuid
@@ -84,6 +85,14 @@ class IntegrityCliTests(unittest.TestCase):
         ]
         self.assertEqual(exporter.determine_exit_code(reports), 2)
 
+    def test_exit_code_three_for_authentication_failure(self):
+        reports = [{
+            "status": "authentication_failed",
+            "collection": {"complete": False},
+            "items": [{"status": "source_failed"}],
+        }]
+        self.assertEqual(exporter.determine_exit_code(reports), 3)
+
     def test_integrity_report_is_written_atomically(self):
         with workspace_directory() as directory:
             path = exporter.save_integrity_report(
@@ -96,6 +105,58 @@ class IntegrityCliTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn('"mode": "audit"', text)
             self.assertIn('"exit_code": 0', text)
+
+    def test_run_summary_reuses_assets_and_groups_image_variants(self):
+        first_url = "https://www.zhihu.com/question/1/answer/1"
+        second_url = "https://www.zhihu.com/question/1/answer/2"
+        reports = [{
+            "status": "verified_with_warnings",
+            "collection": {"complete": True, "unsupported_items": [{"type": "pin"}]},
+            "archived_items": [{"url": "https://www.zhihu.com/question/1/answer/3"}],
+            "items": [
+                {
+                    "name": "甲", "url": first_url, "status": "downloaded",
+                    "image_activity": {"downloaded": 1, "reused": 0},
+                    "assets": [{
+                        "url": "https://pic1.zhimg.com/v2-aaa_720w.jpg",
+                        "filename": "v2-aaa_720w.jpg", "status": "verified",
+                    }],
+                },
+                {
+                    "name": "乙", "url": second_url, "status": "skipped_verified",
+                    "image_activity": {"downloaded": 0, "reused": 1},
+                    "assets": [
+                        {
+                            "url": "https://pic1.zhimg.com/v2-bbb_r.jpg",
+                            "filename": "v2-bbb_r.jpg", "status": "remote_fallback",
+                        },
+                        {
+                            "url": "https://pica.zhimg.com/50/v2-bbb_720w.jpg",
+                            "filename": "v2-bbb_720w.jpg", "status": "remote_fallback",
+                        },
+                    ],
+                },
+            ],
+        }]
+        summary = exporter.summarize_collection_reports(reports)
+        self.assertEqual(summary["downloaded"], 1)
+        self.assertEqual(summary["unchanged"], 1)
+        self.assertEqual(summary["verified"], 2)
+        self.assertEqual(summary["unsupported"], 1)
+        self.assertEqual(summary["archived_items"], 1)
+        self.assertEqual(summary["images"]["downloaded"], 1)
+        self.assertEqual(summary["images"]["reused"], 1)
+        self.assertEqual(summary["images"]["verified"], 1)
+        self.assertEqual(summary["images"]["remote_fallback"], 1)
+        self.assertEqual(len(summary["images"]["issues"]), 1)
+        self.assertEqual(len(summary["images"]["issues"][0]["urls"]), 2)
+
+        with workspace_directory() as directory:
+            path = exporter.save_integrity_report(
+                reports, ExportMode.BALANCED, logs_dir=directory, timestamp="summary"
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["summary"], summary)
 
 
 if __name__ == "__main__":

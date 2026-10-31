@@ -45,6 +45,7 @@ class PrefetchImagesTests(unittest.TestCase):
                 fetched.append(url)
                 return FakeImageResponse(content=f"bytes-{url[-6:]}".encode())
 
+            tracker = render.ImageAssetTracker()
             render.prefetch_images(
                 [
                     "https://pic.zhimg.com/have.jpg",
@@ -56,6 +57,7 @@ class PrefetchImagesTests(unittest.TestCase):
                 str(assets),
                 request_get=request_get,
                 max_workers=2,
+                asset_tracker=tracker,
             )
 
             self.assertEqual(
@@ -65,19 +67,26 @@ class PrefetchImagesTests(unittest.TestCase):
             self.assertEqual((assets / "have.jpg").read_bytes(), b"cached")
             self.assertTrue((assets / "miss1.jpg").stat().st_size > 0)
             self.assertTrue((assets / "miss2.jpg").stat().st_size > 0)
+            self.assertEqual(tracker.summary(), {"downloaded": 2, "reused": 1})
 
     def test_prefetch_failure_does_not_raise(self):
         with workspace_directory() as directory:
             def request_get(url=None, **kwargs):
                 raise requests.ConnectionError("reset")
 
-            render.prefetch_images(
-                ["https://pic.zhimg.com/broken.jpg"],
-                str(directory / "assets"),
-                request_get=request_get,
-                max_workers=1,
-            )
+            with self.assertLogs(level="DEBUG") as captured:
+                render.prefetch_images(
+                    ["https://pic.zhimg.com/broken.jpg"],
+                    str(directory / "assets"),
+                    request_get=request_get,
+                    max_workers=1,
+                )
             self.assertFalse((directory / "assets" / "broken.jpg").exists())
+            self.assertTrue(any(
+                record.levelno == 10 and "图片预取失败" in record.getMessage()
+                for record in captured.records
+            ))
+            self.assertFalse(any(record.levelno >= 30 for record in captured.records))
 
 
 if __name__ == "__main__":

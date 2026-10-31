@@ -23,7 +23,7 @@ from integrity import (
     parse_source_identity,
     snapshot_from_html,
 )
-from zhihu_client import ZhihuClient, default_client
+from zhihu_client import AuthenticationError, ZhihuClient, default_client
 
 
 def _client(request_get=None, sleep=None):
@@ -55,6 +55,8 @@ def _collection_confirmed_deleted(collection_id, request_get=None):
             f"https://www.zhihu.com/api/v4/collections/{collection_id}"
         )
         return False
+    except AuthenticationError:
+        raise
     except Exception as exc:
         return _error_status_code(exc) == 404
 
@@ -78,6 +80,8 @@ def get_article_nums_of_collection(
             total = payload["paging"]["totals"]
             logging.info(f"收藏夹 {collection_id} 包含 {total} 个项目")
             return int(total)
+        except AuthenticationError:
+            raise
         except Exception as exc:
             last_error = exc
             if _error_status_code(exc) == 404:
@@ -133,6 +137,8 @@ def fetch_collection_items(
                 if not isinstance(payload, dict) or not isinstance(payload.get('data'), list):
                     raise ValueError("收藏夹API响应缺少data数组")
                 break
+            except AuthenticationError:
+                raise
             except Exception as exc:
                 last_error = exc
                 if _error_status_code(exc) == 404:
@@ -164,6 +170,8 @@ def fetch_collection_items(
             if totals is None:
                 try:
                     totals = get_total(collection_id)
+                except AuthenticationError:
+                    raise
                 except Exception as exc:
                     result = CollectionFetchResult(collection_id, 0)
                     # 首页已成功返回，收藏夹存在；此处仅总数回退请求失败。
@@ -379,6 +387,8 @@ def fetch_answer_snapshots(answer_url, request_get=None):
     source_type, answer_id = parse_source_identity(canonical_url)
     try:
         metadata = fetch_answer_metadata(canonical_url, request_get=request_get)
+    except AuthenticationError:
+        raise
     except Exception:
         metadata = SourceMetadata(canonical_url, source_type, answer_id, None)
     candidates = []
@@ -396,6 +406,8 @@ def fetch_answer_snapshots(answer_url, request_get=None):
                 snapshot_from_html(api_metadata, "answer_api", payload["content"])
             )
             api_candidate_ok = True
+    except AuthenticationError:
+        raise
     except Exception as exc:
         logging.warning(f"回答API候选获取失败: {canonical_url}: {exc}")
     # 懒升级：API 候选成功时不抓网页候选（常态下省一次易被限流的请求），
@@ -405,6 +417,8 @@ def fetch_answer_snapshots(answer_url, request_get=None):
             page_html = _client(request_get).get_page(canonical_url)
             candidates.extend(parse_answer_page_candidates(metadata, page_html))
             _record_page_candidate_success()
+        except AuthenticationError:
+            raise
         except Exception as exc:
             logging.warning(f"回答网页候选获取失败: {canonical_url}: {exc}")
             _record_page_candidate_failure()
@@ -439,6 +453,8 @@ def fetch_article_metadata(article_url, request_get=None):
             article_id,
             payload,
         )
+    except AuthenticationError:
+        raise
     except Exception as exc:
         logging.warning(f"专栏元数据API获取失败，继续抓取正文: {canonical_url}: {exc}")
         return SourceMetadata(canonical_url, source_type, article_id, None)
@@ -462,6 +478,8 @@ def fetch_article_snapshots(article_url, request_get=None):
             )
             return [snapshot_from_html(api_metadata, "article_api", content)]
         logging.warning(f"专栏API未返回正文，尝试网页候选: {canonical_url}")
+    except AuthenticationError:
+        raise
     except Exception as exc:
         logging.warning(f"专栏API候选获取失败，尝试网页候选: {canonical_url}: {exc}")
 

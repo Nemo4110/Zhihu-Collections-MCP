@@ -20,6 +20,12 @@ from mcp.server.stdio import stdio_server
 import exporter
 import sources
 from paths_config import load_config, parse_output_path
+from zhihu_client import (
+    AuthenticationCheckError,
+    AuthenticationError,
+    preflight_authentication,
+)
+
 
 # 创建MCP服务器实例
 app = Server("zhihu-collections")
@@ -148,6 +154,10 @@ async def export_collection_handler(args: dict) -> list[TextContent]:
         output_root = parse_output_path(output_dir, config.get("os", ""))
 
     rendered_root = str(output_root) if output_root else str(exporter.DEFAULT_OUTPUT_ROOT)
+    try:
+        auth_status = preflight_authentication()
+    except (AuthenticationError, AuthenticationCheckError) as exc:
+        return [TextContent(type="text", text=f"❌ 认证预检失败，未开始导出: {exc}")]
     result = f"🚀 开始导出收藏夹：{collection_name}\n"
     result += f"📎 URL: {collection_url}\n"
     result += f"📁 输出目录: {rendered_root}\n\n"
@@ -158,6 +168,7 @@ async def export_collection_handler(args: dict) -> list[TextContent]:
             collection_name,
             collection_url,
             output_root=output_root,
+            allow_deletion_sync=auth_status.authenticated,
         )
         result += f"✅ 导出完成！状态: {report.get('status', 'unknown')}"
     except Exception as e:
@@ -172,6 +183,11 @@ async def get_collection_info_handler(args: dict) -> list[TextContent]:
 
     if not collection_url:
         return [TextContent(type="text", text="错误: 需要提供collection_url参数")]
+
+    try:
+        preflight_authentication()
+    except (AuthenticationError, AuthenticationCheckError) as exc:
+        return [TextContent(type="text", text=f"认证预检失败: {exc}")]
 
     try:
         collection_id = collection_url.split('?')[0].split('/')[-1]

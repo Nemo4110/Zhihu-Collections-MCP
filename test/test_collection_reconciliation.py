@@ -3,6 +3,7 @@ import unittest
 
 import sources
 from integrity import CollectionFetchResult
+from zhihu_client import AuthenticationError
 
 
 class FakeResponse:
@@ -61,6 +62,19 @@ class CollectionReconciliationTests(unittest.TestCase):
         self.assertEqual(result.raw_item_count, 45)
         self.assertEqual(len(result.exportable_items), 45)
 
+
+    def test_authentication_error_is_not_retried_or_converted_to_incomplete(self):
+        calls = []
+
+        def request_get(url, **kwargs):
+            calls.append(url)
+            raise AuthenticationError("HTTP 401")
+
+        with self.assertRaises(AuthenticationError):
+            sources.fetch_collection_items(
+                "123", request_get=request_get, sleep=lambda _: None
+            )
+        self.assertEqual(len(calls), 1)
 
     def test_api_end_allows_explicit_reported_total_gap(self):
         offsets = []

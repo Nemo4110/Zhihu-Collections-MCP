@@ -8,6 +8,7 @@ sources._reset_page_candidate_state 传播。
 import argparse
 import logging
 import os
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from exporter import (
     determine_exit_code,
     export_collection_with_integrity,
     save_integrity_report,
+    summarize_collection_reports,
 )
 from paths_config import (
     COLLECTION_ARCHIVED_STATUS,
@@ -26,6 +28,11 @@ from paths_config import (
     parse_output_path,
 )
 import sources
+from zhihu_client import (
+    AuthenticationCheckError,
+    AuthenticationError,
+    preflight_authentication,
+)
 
 
 def setup_logging(logs_dir):
@@ -39,6 +46,7 @@ def setup_logging(logs_dir):
     root_logger = logging.getLogger()
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
+        handler.close()
 
     formatter = logging.Formatter(
         '%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
@@ -94,6 +102,7 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    started_at = time.monotonic()
     args = parse_args(argv)
     # 每次运行从参数重建网页候选状态（默认懒升级：API 候选失败才抓网页）
     sources._reset_page_candidate_state(
@@ -101,7 +110,6 @@ def main(argv=None):
         eager=args.page_candidates,
     )
 
-    setup_logging(DEFAULT_OUTPUT_ROOT / "logs")
     config = load_config()
 
     output_root = None
@@ -109,11 +117,12 @@ def main(argv=None):
         output_root = parse_output_path(config['outputPath'], config.get('os', ''))
         if output_root:
             print(f"使用自定义输出路径: {output_root}")
-            setup_logging(output_root / "logs")
         else:
             print("输出路径解析失败，使用默认路径")
     else:
-        print("使用默认输出路径: downloads/")
+        print(f"使用默认输出路径: {DEFAULT_OUTPUT_ROOT}")
+    effective_output_root = output_root or DEFAULT_OUTPUT_ROOT
+    setup_logging(effective_output_root / "logs")
 
     if config.get('openCollection', False):
         print("检测到openCollection模式已启用，请先运行 fetch_collections.py")
@@ -123,6 +132,30 @@ def main(argv=None):
     if not isinstance(zhihu_collections, list) or not zhihu_collections:
         print("没有找到要处理的收藏夹配置")
         return 2
+
+    try:
+        auth_status = preflight_authentication()
+    except (AuthenticationError, AuthenticationCheckError) as exc:
+        logging.error(f"认证预检失败，已停止导出: {exc}")
+        print(f"认证预检失败: {exc}")
+        report_path = save_integrity_report(
+            [{
+                "name": "认证预检",
+                "url": "",
+                "status": "authentication_failed",
+                "collection": {"complete": True},
+                "items": [],
+                "issues": [{"code": "authentication_failed", "message": str(exc)}],
+            }],
+            args.mode,
+            logs_dir=effective_output_root / "logs",
+        )
+        print(f"完整性报告: {report_path}")
+        return 3
+    if auth_status.authenticated:
+        logging.info("Cookie 认证预检通过")
+    else:
+        logging.info("未配置 Cookie，使用匿名模式；远端删除仅报告，不归档")
 
     print(f"运行模式: {args.mode.value}")
     if args.no_page_candidates:
@@ -164,7 +197,22 @@ def main(argv=None):
                 collection_url,
                 mode=args.mode,
                 output_root=output_root,
+                allow_deletion_sync=auth_status.authenticated,
             )
+        except (AuthenticationError, AuthenticationCheckError) as exc:
+            logging.error(f"认证状态失效，停止剩余收藏夹: {exc}")
+            report = getattr(exc, "collection_report", None) or {
+                "name": collection_name,
+                "url": collection_url,
+                "collection": {"complete": True},
+                "items": [],
+            }
+            report["status"] = "authentication_failed"
+            report.setdefault("issues", []).append({
+                "code": "authentication_failed", "message": str(exc)
+            })
+            collection_reports.append(report)
+            break
         except ManifestSchemaError as exc:
             report = {
                 "name": collection_name,
@@ -202,41 +250,35 @@ def main(argv=None):
             logging.warning(f"回写已归档收藏夹标记到 config.json 失败: {exc}")
 
     report_path = save_integrity_report(
-        collection_reports, args.mode, logs_dir=output_root / "logs" if output_root else None
+        collection_reports, args.mode, logs_dir=effective_output_root / "logs"
     )
     exit_code = determine_exit_code(collection_reports)
-    verified = sum(
-        1
-        for collection in collection_reports
-        for item in collection.get("items", [])
-        if item.get("status") in {"downloaded", "repaired", "refreshed", "adopted", "audit_verified", "skipped_verified"}
-    )
-    failed = sum(
-        1
-        for collection in collection_reports
-        for item in collection.get("items", [])
-        if item.get("status") in {
-            "invalid", "metadata_failed", "source_failed", "render_failed",
-            "render_invalid", "final_invalid"
-        }
-    )
-    unsupported = sum(
-        len(collection.get("collection", {}).get("unsupported_items", []))
-        for collection in collection_reports
-    )
-    archived_collections = sum(
-        1
-        for collection in collection_reports
-        if collection.get("status") == "collection_archived"
-    )
+    summary = summarize_collection_reports(collection_reports)
+    images = summary["images"]
     print("\n完整性处理完毕")
-    print(f"已验证支持内容: {verified}")
-    print(f"失败支持内容: {failed}")
-    print(f"不支持内容: {unsupported}")
-    if archived_collections:
-        print(f"已归档收藏夹（远端已删除）: {archived_collections}")
+    print(f"处理收藏夹: {summary['processed_collections']}")
+    print(f"已验证支持内容: {summary['verified']}")
+    print(
+        f"本轮变更: 新下载 {summary['downloaded']}，修复 {summary['repaired']}，"
+        f"刷新 {summary['refreshed']}，未变化 {summary['unchanged']}"
+    )
+    print(f"失败支持内容: {summary['failed']}")
+    print(f"不支持内容: {summary['unsupported']}")
+    if summary["archived_collections"]:
+        print(f"已归档收藏夹（远端已删除）: {summary['archived_collections']}")
     if skipped_archived:
         print(f"跳过已归档收藏夹（config 已标记）: {skipped_archived}")
+    if summary["archived_items"]:
+        print(f"已归档移出条目: {summary['archived_items']}")
+    if summary["archivable_items"]:
+        print(f"仅报告未归档条目: {summary['archivable_items']}")
+    print(
+        f"图片: 新下载 {images['downloaded']}，复用 {images['reused']}，"
+        f"本地完整 {images['verified']}，远程降级 {images['remote_fallback']}，"
+        f"缺失 {images['missing']}"
+    )
+    print(f"输出目录: {effective_output_root}")
+    print(f"耗时: {time.monotonic() - started_at:.1f} 秒")
     print(f"完整性报告: {report_path}")
     return exit_code
 

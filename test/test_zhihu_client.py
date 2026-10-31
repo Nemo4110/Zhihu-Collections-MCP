@@ -6,19 +6,26 @@ Cookie + 重试）。测试注入假传输，只断言"以正确的参数调用�
 正确解析响应、正确重试"，不发真实网络请求。
 """
 import unittest
+from unittest.mock import patch
 
 import requests
 
 import zhihu_client
-from zhihu_client import ZhihuClient
+from zhihu_client import (
+    AuthenticationCheckError,
+    AuthenticationError,
+    ZhihuClient,
+    preflight_authentication,
+)
 
 
 class FakeResponse:
-    def __init__(self, payload=None, text="", content=b"", status_ok=True):
+    def __init__(self, payload=None, text="", content=b"", status_ok=True, status_code=None):
         self._payload = payload
         self.text = text
         self.content = content
         self._status_ok = status_ok
+        self.status_code = status_code or (200 if status_ok else 403)
 
     def json(self):
         if self._payload is None:
@@ -27,7 +34,7 @@ class FakeResponse:
 
     def raise_for_status(self):
         if not self._status_ok:
-            raise requests.HTTPError("403")
+            raise requests.HTTPError(str(self.status_code), response=self)
 
 
 class RecordingTransport:
@@ -119,6 +126,56 @@ class GetPageDataTests(unittest.TestCase):
         headers = transport.calls[0]["headers"]
         self.assertNotIn("x-requested-with", headers)
         self.assertEqual(headers["Sec-Fetch-Dest"], "document")
+
+
+class AuthenticationPreflightTests(unittest.TestCase):
+    def test_anonymous_mode_does_not_request_user_api(self):
+        def unexpected(**kwargs):
+            raise AssertionError("anonymous preflight must not perform a request")
+
+        client = ZhihuClient(transport=unexpected, cookies={}, auth_configured=False)
+        status = preflight_authentication(client)
+        self.assertTrue(status.anonymous)
+
+    def test_valid_cookie_returns_authenticated_status(self):
+        transport = RecordingTransport([
+            (zhihu_client.ME_API_URL, FakeResponse(payload={"url_token": "user"}))
+        ])
+        client = ZhihuClient(transport=transport, cookies={"z_c0": "secret"})
+        self.assertTrue(preflight_authentication(client).authenticated)
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_401_is_authentication_failure_without_cookie_details(self):
+        transport = RecordingTransport([
+            (zhihu_client.ME_API_URL, FakeResponse(status_ok=False, status_code=401))
+        ])
+        client = ZhihuClient(transport=transport, cookies={"z_c0": "secret"})
+        with self.assertRaises(AuthenticationError) as caught:
+            preflight_authentication(client)
+        self.assertNotIn("secret", str(caught.exception))
+        self.assertNotIn("z_c0", str(caught.exception))
+
+    def test_403_is_indeterminate_not_expired_cookie(self):
+        transport = RecordingTransport([
+            (zhihu_client.ME_API_URL, FakeResponse(status_ok=False, status_code=403))
+        ])
+        client = ZhihuClient(transport=transport, cookies={"z_c0": "secret"})
+        with self.assertRaises(AuthenticationCheckError):
+            preflight_authentication(client)
+
+    def test_missing_user_identity_is_authentication_failure(self):
+        transport = RecordingTransport([
+            (zhihu_client.ME_API_URL, FakeResponse(payload={}))
+        ])
+        client = ZhihuClient(transport=transport, cookies={"z_c0": "secret"})
+        with self.assertRaises(AuthenticationError):
+            preflight_authentication(client)
+
+    def test_explicit_cookie_path_counts_as_configured_even_when_empty(self):
+        with patch.object(zhihu_client, "_default_instance", None), patch.dict(
+            zhihu_client.os.environ, {"ZHIHU_COOKIES_FILE": "missing-cookies.json"}
+        ), patch("paths_config.load_cookies", return_value={}):
+            self.assertTrue(zhihu_client.default_client().auth_configured)
 
 
 class DownloadTests(unittest.TestCase):

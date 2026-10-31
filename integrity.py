@@ -765,6 +765,7 @@ class RunReport:
     generated_at: str = field(
         default_factory=lambda: datetime.now().astimezone().isoformat(timespec="seconds")
     )
+    summary: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -772,5 +773,6 @@ class RunReport:
             "mode": self.mode.value,
             "generated_at": self.generated_at,
             "exit_code": self.exit_code,
+            "summary": self.summary or {},
             "collections": self.collections,
         }

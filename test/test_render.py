@@ -10,7 +10,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from render import Renderer, render_markdown
+from render import ImageAssetTracker, Renderer, render_markdown
 
 
 @contextmanager
@@ -98,6 +98,38 @@ class ImageAssetTests(unittest.TestCase):
             markdown = render_markdown(html, directory / "assets", client=client)
             self.assertIn(f"]( {url})".replace(" ", ""), markdown)
             self.assertIn("失效图", markdown)
+
+    def test_image_tracker_groups_url_variants_by_content_hash(self):
+        first = "https://pic1.zhimg.com/v2-f9cdf272b1382934a68add6442dd7cdf_r.jpg"
+        second = "https://pica.zhimg.com/50/v2-f9cdf272b1382934a68add6442dd7cdf_720w.jpg"
+        tracker = ImageAssetTracker()
+        with workspace_directory() as directory:
+            render_markdown(
+                f'<p><img src="{first}"><img src="{second}"></p>',
+                directory / "assets",
+                client=FakeClient(fail=True),
+                asset_tracker=tracker,
+            )
+        issues = tracker.issues()
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(set(issues[0]["urls"]), {first, second})
+        self.assertEqual(issues[0]["status"], "remote_fallback")
+
+    def test_image_tracker_distinguishes_download_and_reuse(self):
+        url = "https://pic1.zhimg.com/v2-abc123_720w.jpg"
+        html = f'<p><img src="{url}"></p>'
+        with workspace_directory() as directory:
+            client = FakeClient(contents={url: b"jpeg-bytes"})
+            first = ImageAssetTracker()
+            render_markdown(
+                html, directory / "assets", client=client, asset_tracker=first
+            )
+            second = ImageAssetTracker()
+            render_markdown(
+                html, directory / "assets", client=client, asset_tracker=second
+            )
+        self.assertEqual(first.summary(), {"downloaded": 1, "reused": 0})
+        self.assertEqual(second.summary(), {"downloaded": 0, "reused": 1})
 
 
 class BasicConversionTests(unittest.TestCase):
