@@ -513,17 +513,12 @@ def export_collection_with_integrity(
         expected_collection_id=collection_id,
         collection_url=collection_url,
     )
-    # 删除同步：清单中已不在收藏夹列表里的条目归档到 .archived.items/<收藏夹>/。
-    # 仅在分页完整时执行；--audit 严格只读，只报告不动文件。
+    # 删除同步：清单中已不在本轮完整可见列表里的条目归档到 .archived.items/<收藏夹>/。
+    # total_mismatch 仅保留数量警告；归档保留文件，不据此阻断同步。
+    # --audit 严格只读，匿名模式无法确认权限与删除，均只报告不动文件。
     current_urls = {item.url for item in result.exportable_items}
     pending_removed = any(url not in current_urls for url in manifest.records)
-    if pending_removed and result.total_mismatch:
-        # 分页对账异常（隐藏/失效条目仍计入 totals）时，无法区分「用户取消
-        # 收藏」与「暂时不可见」：本轮不归档也不报告，待 totals 恢复一致再同步。
-        logging.info(
-            f"收藏夹 {collection_name} 存在 total_mismatch，本轮跳过疑似移出条目的归档"
-        )
-    elif pending_removed and not allow_deletion_sync:
+    if pending_removed and not allow_deletion_sync:
         collection_report["archivable_items"] = [
             {"url": url, "title": manifest.records[url].get("title")}
             for url in sorted(manifest.records)

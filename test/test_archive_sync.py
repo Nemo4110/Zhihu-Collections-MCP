@@ -652,8 +652,35 @@ class ExportRemovedItemsIntegrationTests(unittest.TestCase):
             self.assertFalse((directory / ".archived.items").exists())
             self.assertEqual(len(report["archivable_items"]), 1)
 
-    def test_total_mismatch_defers_item_archival(self):
-        """分页对账异常时无法区分「取消收藏」与「隐藏」，本轮不得归档。"""
+    def test_total_mismatch_anonymous_removed_item_is_only_reported(self):
+        with workspace_directory() as directory:
+            self._prepare(directory)
+            report = export_collection_with_integrity(
+                "我的收藏",
+                "https://www.zhihu.com/collection/777",
+                fetch_result=make_mismatch_fetch_result(
+                    [make_item(self.url_kept, "回答乙", "3")], expected_total=3
+                ),
+                output_root=directory,
+                allow_deletion_sync=False,
+                fetch_snapshot_fn=lambda url: make_snapshot(url),
+                render_markdown_fn=lambda snapshot, item: f"> {item.url}\n正文内容",
+            )
+            collection = directory / "我的收藏"
+            self.assertTrue((collection / "回答甲.md").exists())
+            self.assertFalse((directory / ".archived.items").exists())
+            self.assertEqual(
+                [entry["url"] for entry in report["archivable_items"]],
+                [self.url_removed],
+            )
+            manifest = IntegrityManifestStore.load(
+                collection / ".zhihu-integrity.json",
+                expected_collection_id="777",
+            )
+            self.assertIn(self.url_removed, manifest.records)
+
+    def test_total_mismatch_does_not_block_item_archival(self):
+        """完整可见列表外的条目可逆归档，total_mismatch 仍保留为警告。"""
         with workspace_directory() as directory:
             self._prepare(directory)
             report = export_collection_with_integrity(
@@ -669,10 +696,44 @@ class ExportRemovedItemsIntegrationTests(unittest.TestCase):
                 render_markdown_fn=lambda snapshot, item: f"> {item.url}\n正文内容",
             )
             collection = directory / "我的收藏"
-            self.assertTrue((collection / "回答甲.md").exists())
-            self.assertFalse((directory / ".archived.items").exists())
-            self.assertNotIn("archived_items", report)
-            self.assertNotIn("archivable_items", report)
+            self.assertFalse((collection / "回答甲.md").exists())
+            self.assertTrue((directory / ".archived.items" / "我的收藏" / "回答甲.md").exists())
+            self.assertTrue((collection / "回答乙.md").exists())
+            self.assertEqual(
+                [entry["url"] for entry in report["archived_items"]],
+                [self.url_removed],
+            )
+            self.assertEqual(
+                report["collection"]["total_mismatch"],
+                {"expected": 3, "actual": 1},
+            )
+            self.assertEqual(report["status"], "verified_with_warnings")
+            self.assertEqual(determine_exit_code([report]), 0)
+            manifest = IntegrityManifestStore.load(
+                collection / ".zhihu-integrity.json",
+                expected_collection_id="777",
+            )
+            self.assertNotIn(self.url_removed, manifest.records)
+            self.assertIn(self.url_kept, manifest.records)
+
+            history_path = (
+                directory / ".archived.items" / "我的收藏" / ".archived-manifest.json"
+            )
+            history_before = history_path.read_text(encoding="utf-8")
+            second_report = export_collection_with_integrity(
+                "我的收藏",
+                "https://www.zhihu.com/collection/777",
+                mode=ExportMode.BALANCED,
+                fetch_result=make_mismatch_fetch_result(
+                    [make_item(self.url_kept, "回答乙", "3")], expected_total=3
+                ),
+                output_root=directory,
+                allow_deletion_sync=True,
+                fetch_snapshot_fn=lambda url: make_snapshot(url),
+                render_markdown_fn=lambda snapshot, item: f"> {item.url}\n正文内容",
+            )
+            self.assertNotIn("archived_items", second_report)
+            self.assertEqual(history_path.read_text(encoding="utf-8"), history_before)
 
     def test_audit_mode_reports_without_moving(self):
         with workspace_directory() as directory:
@@ -695,6 +756,77 @@ class ExportRemovedItemsIntegrationTests(unittest.TestCase):
                 [entry["url"] for entry in report["archivable_items"]],
                 [self.url_removed],
             )
+
+    def test_total_mismatch_audit_reports_without_moving(self):
+        with workspace_directory() as directory:
+            self._prepare(directory)
+            report = export_collection_with_integrity(
+                "我的收藏",
+                "https://www.zhihu.com/collection/777",
+                mode=ExportMode.AUDIT,
+                fetch_result=make_mismatch_fetch_result(
+                    [make_item(self.url_kept, "回答乙", "3")], expected_total=3
+                ),
+                output_root=directory,
+                allow_deletion_sync=True,
+                fetch_snapshot_fn=lambda url: make_snapshot(url),
+                render_markdown_fn=lambda snapshot, item: f"> {item.url}\n正文内容",
+            )
+            collection = directory / "我的收藏"
+            self.assertTrue((collection / "回答甲.md").exists())
+            self.assertFalse((directory / ".archived.items").exists())
+            self.assertEqual(
+                [entry["url"] for entry in report["archivable_items"]],
+                [self.url_removed],
+            )
+            manifest = IntegrityManifestStore.load(
+                collection / ".zhihu-integrity.json",
+                expected_collection_id="777",
+            )
+            self.assertIn(self.url_removed, manifest.records)
+
+    def test_reappearing_item_is_downloaded_after_archival(self):
+        """条目重新可见时重新导出活动副本，归档历史保持不动。"""
+        with workspace_directory() as directory:
+            self._prepare(directory)
+            export_collection_with_integrity(
+                "我的收藏",
+                "https://www.zhihu.com/collection/777",
+                fetch_result=make_fetch_result([make_item(self.url_kept, "回答乙", "3")]),
+                output_root=directory,
+                allow_deletion_sync=True,
+                fetch_snapshot_fn=lambda url: make_snapshot(url),
+                render_markdown_fn=lambda snapshot, item: f"> {item.url}\n正文内容",
+            )
+            items = [
+                make_item(self.url_removed, "回答甲", "2"),
+                make_item(self.url_kept, "回答乙", "3"),
+            ]
+            report = export_collection_with_integrity(
+                "我的收藏",
+                "https://www.zhihu.com/collection/777",
+                fetch_result=make_fetch_result(items),
+                output_root=directory,
+                allow_deletion_sync=True,
+                fetch_snapshot_fn=lambda url: make_snapshot(
+                    url, "2" if url == self.url_removed else "3"
+                ),
+                render_markdown_fn=lambda snapshot, item: f"> {item.url}\n正文内容",
+            )
+            collection = directory / "我的收藏"
+            self.assertTrue((collection / "回答甲.md").exists())
+            self.assertTrue(
+                (directory / ".archived.items" / "我的收藏" / "回答甲.md").exists()
+            )
+            item_report = next(
+                item for item in report["items"] if item["url"] == self.url_removed
+            )
+            self.assertEqual(item_report["status"], "downloaded")
+            manifest = IntegrityManifestStore.load(
+                collection / ".zhihu-integrity.json",
+                expected_collection_id="777",
+            )
+            self.assertIn(self.url_removed, manifest.records)
 
 
 if __name__ == "__main__":
